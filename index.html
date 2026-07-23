@@ -61,7 +61,7 @@
 <body>
   <main class="card" aria-live="polite">
     <div>
-      <div class="eyebrow">MCAT Study Timer</div>
+      <div class="eyebrow">Total Study Time Today</div>
       <div id="task" class="task">Checking Clockify…</div>
       <div id="timer" class="timer">00:00:00</div>
       <div id="status" class="status"><span class="dot"></span>Connecting</div>
@@ -76,9 +76,9 @@
     const errorEl = document.getElementById("error");
     const refreshButton = document.getElementById("refreshButton");
 
-    let activeStart = null;
-    let lastServerNow = null;
-    let fetchedAtMs = null;
+    let baseTotalMs = 0;
+    let running = false;
+    let fetchedAtMs = Date.now();
 
     function pad(n) {
       return String(Math.max(0, Math.floor(n))).padStart(2, "0");
@@ -92,19 +92,9 @@
       return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
     }
 
-    function estimatedNowMs() {
-      if (!lastServerNow || !fetchedAtMs) return Date.now();
-      return new Date(lastServerNow).getTime() + (Date.now() - fetchedAtMs);
-    }
-
     function tick() {
-      if (!activeStart) {
-        timerEl.textContent = "00:00:00";
-        return;
-      }
-      timerEl.textContent = formatElapsed(
-        estimatedNowMs() - new Date(activeStart).getTime()
-      );
+      const liveExtra = running ? Date.now() - fetchedAtMs : 0;
+      timerEl.textContent = formatElapsed(baseTotalMs + liveExtra);
     }
 
     function getTimerUrl() {
@@ -112,13 +102,11 @@
       const userId = localStorage.getItem("clockifyTimerUserId");
       const workspaceId = localStorage.getItem("clockifyTimerWorkspaceId");
       const params = new URLSearchParams();
-
       if (region && userId && workspaceId) {
         params.set("region", region);
         params.set("user", userId);
         params.set("workspace", workspaceId);
       }
-
       const query = params.toString();
       return query ? `/api/timer?${query}` : "/api/timer";
     }
@@ -132,11 +120,9 @@
     async function refresh() {
       refreshButton.disabled = true;
       refreshButton.textContent = "Refreshing…";
-
       try {
         const response = await fetch(getTimerUrl(), { cache: "no-store" });
         const data = await response.json();
-
         if (!response.ok) {
           if (data.resetConnection) clearSavedConnection();
           throw new Error(data.error || `Widget API returned ${response.status}`);
@@ -148,24 +134,22 @@
           localStorage.setItem("clockifyTimerWorkspaceId", data.workspaceId);
         }
 
-        lastServerNow = data.serverNow;
+        baseTotalMs = Number(data.totalTodayMs) || 0;
+        running = Boolean(data.running);
         fetchedAtMs = Date.now();
         errorEl.hidden = true;
 
         const regionText = data.regionLabel ? ` · ${data.regionLabel}` : "";
         const workspaceText = data.workspaceName ? ` · ${data.workspaceName}` : "";
 
-        if (data.running && data.start) {
-          activeStart = data.start;
+        if (running) {
           taskEl.textContent = data.description || "Studying";
           statusEl.innerHTML = `<span class="dot"></span>Studying now${workspaceText}${regionText}`;
-          tick();
         } else {
-          activeStart = null;
           taskEl.textContent = "On break";
-          timerEl.textContent = "00:00:00";
-          statusEl.innerHTML = `<span class="dot"></span>No running Clockify timer${workspaceText}${regionText}`;
+          statusEl.innerHTML = `<span class="dot"></span>Total paused${workspaceText}${regionText}`;
         }
+        tick();
       } catch (error) {
         errorEl.hidden = false;
         errorEl.textContent = error.message;
