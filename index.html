@@ -5,334 +5,37 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Total Study Time Today</title>
   <style>
-    :root {
-      color-scheme: light;
-      --ink: #22324a;
-      --muted: #6f7f96;
-      --blue: #5d7ee5;
-      --blue-dark: #405fbf;
-      --blue-soft: #eef3ff;
-      --cream: #fffdf8;
-      --line: rgba(83, 112, 190, .18);
-      --shadow: 0 18px 44px rgba(79, 101, 166, .16);
-    }
-
-    * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; }
-
-    body {
-      display: grid;
-      place-items: center;
-      padding: 6px;
-      background: transparent;
-      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--ink);
-    }
-
-    .card {
-      position: relative;
-      width: min(100%, 720px);
-      min-height: 250px;
-      overflow: hidden;
-      padding: 24px 26px 20px;
-      border: 1px solid var(--line);
-      border-radius: 24px;
-      background:
-        radial-gradient(circle at 12% 10%, rgba(126, 151, 232, .22), transparent 30%),
-        radial-gradient(circle at 90% 90%, rgba(177, 193, 245, .28), transparent 34%),
-        linear-gradient(145deg, #fffdf9 0%, #f8faff 100%);
-      box-shadow: var(--shadow);
-    }
-
-    .card::before,
-    .card::after {
-      content: "";
-      position: absolute;
-      border-radius: 999px;
-      pointer-events: none;
-    }
-
-    .card::before {
-      width: 110px;
-      height: 110px;
-      top: -58px;
-      right: 18px;
-      border: 18px solid rgba(96, 126, 220, .08);
-    }
-
-    .card::after {
-      width: 74px;
-      height: 74px;
-      bottom: -40px;
-      left: -12px;
-      background: rgba(123, 149, 232, .10);
-    }
-
-    .topline {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 27px;
-    }
-
-    .label {
-      font-size: 12px;
-      font-weight: 800;
-      letter-spacing: .13em;
-      text-transform: uppercase;
-      color: #536b9d;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      min-height: 29px;
-      padding: 6px 11px;
-      border: 1px solid rgba(77, 107, 196, .16);
-      border-radius: 999px;
-      background: rgba(255,255,255,.72);
-      color: var(--blue-dark);
-      font-size: 12px;
-      font-weight: 750;
-      box-shadow: 0 5px 16px rgba(83, 112, 190, .08);
-      backdrop-filter: blur(8px);
-    }
-
-    .dot {
-      width: 8px;
-      height: 8px;
-      flex: 0 0 auto;
-      border-radius: 50%;
-      background: #75a487;
-      box-shadow: 0 0 0 4px rgba(117, 164, 135, .12);
-    }
-
-    .badge.running .dot {
-      animation: pulse 1.9s ease-out infinite;
-    }
-
-    .badge.paused .dot {
-      background: #a2aabc;
-      box-shadow: 0 0 0 4px rgba(162, 170, 188, .14);
-      animation: none;
-    }
-
-    @keyframes pulse {
-      0% { box-shadow: 0 0 0 0 rgba(117, 164, 135, .30); }
-      70% { box-shadow: 0 0 0 8px rgba(117, 164, 135, 0); }
-      100% { box-shadow: 0 0 0 0 rgba(117, 164, 135, 0); }
-    }
-
-    .timer-wrap {
-      position: relative;
-      z-index: 1;
-      text-align: center;
-    }
-
-    .timer {
-      font-variant-numeric: tabular-nums;
-      font-size: clamp(54px, 11vw, 88px);
-      font-weight: 780;
-      letter-spacing: -.055em;
-      line-height: .95;
-      color: #314d9c;
-      text-shadow: 0 3px 18px rgba(84, 111, 198, .12);
-    }
-
-    .subtitle {
-      margin-top: 13px;
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--muted);
-    }
-
-    .footer {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      min-height: 33px;
-      margin-top: 19px;
-    }
-
-    button {
-      appearance: none;
-      border: 1px solid rgba(70, 101, 193, .18);
-      border-radius: 999px;
-      padding: 7px 12px;
-      background: rgba(255,255,255,.66);
-      color: #5870b3;
-      font: inherit;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: transform .15s ease, background .15s ease, border-color .15s ease;
-    }
-
-    button:hover {
-      transform: translateY(-1px);
-      background: #fff;
-      border-color: rgba(70, 101, 193, .28);
-    }
-
-    button:disabled {
-      cursor: wait;
-      opacity: .58;
-      transform: none;
-    }
-
-    .error {
-      margin-top: 10px;
-      text-align: center;
-      color: #a64848;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-
-    @media (max-width: 470px) {
-      .card { min-height: 225px; padding: 20px 18px 17px; border-radius: 20px; }
-      .topline { margin-bottom: 24px; }
-      .label { font-size: 10px; letter-spacing: .11em; }
-      .badge { min-height: 27px; padding: 5px 9px; font-size: 11px; }
-      .subtitle { font-size: 12px; }
-    }
+    :root{color-scheme:light;--ink:#22324a;--muted:#6f7f96;--blue:#405fbf;--line:rgba(83,112,190,.18);--shadow:0 18px 44px rgba(79,101,166,.16)}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0}body{display:grid;place-items:center;padding:6px;background:transparent;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink)}
+    .card{position:relative;width:min(100%,720px);min-height:250px;overflow:hidden;padding:24px 26px 20px;border:1px solid var(--line);border-radius:24px;background:radial-gradient(circle at 12% 10%,rgba(126,151,232,.22),transparent 30%),radial-gradient(circle at 90% 90%,rgba(177,193,245,.28),transparent 34%),linear-gradient(145deg,#fffdf9 0%,#f8faff 100%);box-shadow:var(--shadow)}
+    .card:before,.card:after{content:"";position:absolute;border-radius:999px;pointer-events:none}.card:before{width:110px;height:110px;top:-58px;right:18px;border:18px solid rgba(96,126,220,.08)}.card:after{width:74px;height:74px;bottom:-40px;left:-12px;background:rgba(123,149,232,.10)}
+    .top{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:27px}.label{font-size:12px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#536b9d}.badge{display:inline-flex;align-items:center;gap:7px;min-height:29px;padding:6px 11px;border:1px solid rgba(77,107,196,.16);border-radius:999px;background:rgba(255,255,255,.72);color:var(--blue);font-size:12px;font-weight:750;box-shadow:0 5px 16px rgba(83,112,190,.08)}
+    .dot{width:8px;height:8px;border-radius:50%;background:#a2aabc;box-shadow:0 0 0 4px rgba(162,170,188,.14)}.badge.running .dot{background:#75a487;animation:pulse 1.9s ease-out infinite}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(117,164,135,.3)}70%{box-shadow:0 0 0 8px rgba(117,164,135,0)}100%{box-shadow:0 0 0 0 rgba(117,164,135,0)}}
+    .wrap{position:relative;z-index:1;text-align:center}.timer{font-variant-numeric:tabular-nums;font-size:clamp(54px,11vw,88px);font-weight:780;letter-spacing:-.055em;line-height:.95;color:#314d9c;text-shadow:0 3px 18px rgba(84,111,198,.12)}.subtitle{margin-top:13px;font-size:13px;font-weight:600;color:var(--muted)}
+    .footer{position:relative;z-index:1;display:flex;justify-content:center;min-height:33px;margin-top:19px}button{appearance:none;border:1px solid rgba(70,101,193,.18);border-radius:999px;padding:7px 12px;background:rgba(255,255,255,.66);color:#5870b3;font:inherit;font-size:12px;font-weight:700;cursor:pointer}button:disabled{cursor:wait;opacity:.58}.error{margin-top:10px;text-align:center;color:#a64848;font-size:12px}
+    @media(max-width:470px){.card{min-height:225px;padding:20px 18px 17px;border-radius:20px}.top{margin-bottom:24px}.label{font-size:10px}.badge{font-size:11px}.subtitle{font-size:12px}}
   </style>
 </head>
 <body>
   <main class="card" aria-live="polite">
-    <div class="topline">
-      <div class="label">Total Study Time Today</div>
-      <div id="statusBadge" class="badge paused"><span class="dot"></span><span id="statusText">Connecting</span></div>
-    </div>
-
-    <div class="timer-wrap">
-      <div id="timer" class="timer">00:00:00</div>
-      <div class="subtitle">Zahra’s active study time, updated live</div>
-    </div>
-
-    <div class="footer">
-      <button id="refreshButton" type="button">↻ Refresh</button>
-    </div>
-
-    <div id="error" class="error" hidden></div>
+    <div class="top"><div class="label">Total Study Time Today</div><div id="badge" class="badge"><span class="dot"></span><span id="status">Connecting</span></div></div>
+    <div class="wrap"><div id="timer" class="timer">00:00:00</div><div class="subtitle">Zahra’s active study time, updated live</div></div>
+    <div class="footer"><button id="refresh" type="button">↻ Refresh</button></div><div id="error" class="error" hidden></div>
   </main>
-
-  <script>
-    const timerEl = document.getElementById("timer");
-    const statusBadge = document.getElementById("statusBadge");
-    const statusText = document.getElementById("statusText");
-    const errorEl = document.getElementById("error");
-    const refreshButton = document.getElementById("refreshButton");
-
-    let baseTotalMs = 0;
-    let running = false;
-    let fetchedAtMs = Date.now();
-
-    function pad(n) {
-      return String(Math.max(0, Math.floor(n))).padStart(2, "0");
-    }
-
-    function formatElapsed(ms) {
-      const total = Math.max(0, Math.floor(ms / 1000));
-      const hours = Math.floor(total / 3600);
-      const minutes = Math.floor((total % 3600) / 60);
-      const seconds = total % 60;
-      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
-    }
-
-    function migrationBaselineMs() {
-      const date = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date());
-
-      // Only Circulatory System 2 and Memory happened before Clockify had a
-      // backdated entry. Conditioning and later blocks already exist there.
-      return date === "2026-07-23" ? 4052000 : 0;
-    }
-
-    function tick() {
-      const liveExtra = running ? Date.now() - fetchedAtMs : 0;
-      timerEl.textContent = formatElapsed(baseTotalMs + liveExtra);
-    }
-
-    function getTimerUrl() {
-      const region = localStorage.getItem("clockifyTimerRegion");
-      const userId = localStorage.getItem("clockifyTimerUserId");
-      const workspaceId = localStorage.getItem("clockifyTimerWorkspaceId");
-      const params = new URLSearchParams();
-
-      if (region && userId && workspaceId) {
-        params.set("region", region);
-        params.set("user", userId);
-        params.set("workspace", workspaceId);
-      }
-
-      const query = params.toString();
-      return query ? `/api/timer?${query}` : "/api/timer";
-    }
-
-    function clearSavedConnection() {
-      localStorage.removeItem("clockifyTimerRegion");
-      localStorage.removeItem("clockifyTimerUserId");
-      localStorage.removeItem("clockifyTimerWorkspaceId");
-    }
-
-    function setStatus(isRunning) {
-      statusBadge.classList.toggle("running", isRunning);
-      statusBadge.classList.toggle("paused", !isRunning);
-      statusText.textContent = isRunning ? "Live" : "Paused";
-    }
-
-    async function refresh() {
-      refreshButton.disabled = true;
-      refreshButton.textContent = "Refreshing…";
-
-      try {
-        const response = await fetch(getTimerUrl(), { cache: "no-store" });
-        const data = await response.json();
-
-        if (!response.ok) {
-          if (data.resetConnection) clearSavedConnection();
-          throw new Error(data.error || `Widget API returned ${response.status}`);
-        }
-
-        if (data.region && data.userId && data.workspaceId) {
-          localStorage.setItem("clockifyTimerRegion", data.region);
-          localStorage.setItem("clockifyTimerUserId", data.userId);
-          localStorage.setItem("clockifyTimerWorkspaceId", data.workspaceId);
-        }
-
-        baseTotalMs = (Number(data.totalTodayMs) || 0) + migrationBaselineMs();
-        running = Boolean(data.running);
-        fetchedAtMs = Date.now();
-        errorEl.hidden = true;
-        setStatus(running);
-        tick();
-      } catch (error) {
-        errorEl.hidden = false;
-        errorEl.textContent = error.message;
-        statusBadge.classList.remove("running");
-        statusBadge.classList.add("paused");
-        statusText.textContent = "Offline";
-      } finally {
-        refreshButton.disabled = false;
-        refreshButton.textContent = "↻ Refresh";
-      }
-    }
-
-    refreshButton.addEventListener("click", refresh);
-    setInterval(tick, 1000);
-    setInterval(refresh, 300000);
-    refresh();
-  </script>
+<script>
+const timer=document.getElementById('timer'),badge=document.getElementById('badge'),status=document.getElementById('status'),errorEl=document.getElementById('error'),button=document.getElementById('refresh');
+let base=0,running=false,fetched=Date.now();
+const FINAL_JULY_23_MS=23418000;
+function nyDate(){return new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())}
+function isLockedFinal(){return nyDate()==='2026-07-23'}
+function baseline(){return isLockedFinal()?4052000:0}
+function pad(n){return String(Math.max(0,Math.floor(n))).padStart(2,'0')}
+function format(ms){const s=Math.max(0,Math.floor(ms/1000));return `${pad(s/3600)}:${pad((s%3600)/60)}:${pad(s%60)}`}
+function tick(){timer.textContent=format(base+(running?Date.now()-fetched:0))}
+function apiUrl(){const r=localStorage.getItem('clockifyTimerRegion'),u=localStorage.getItem('clockifyTimerUserId'),w=localStorage.getItem('clockifyTimerWorkspaceId'),p=new URLSearchParams();if(r&&u&&w){p.set('region',r);p.set('user',u);p.set('workspace',w)}return p.toString()?`/api/timer?${p}`:'/api/timer'}
+function setState(live){badge.classList.toggle('running',live);status.textContent=live?'Live':'Paused'}
+async function refresh(){button.disabled=true;button.textContent='Refreshing…';try{const response=await fetch(apiUrl(),{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.error||`Widget API returned ${response.status}`);if(data.region&&data.userId&&data.workspaceId){localStorage.setItem('clockifyTimerRegion',data.region);localStorage.setItem('clockifyTimerUserId',data.userId);localStorage.setItem('clockifyTimerWorkspaceId',data.workspaceId)}if(isLockedFinal()){base=FINAL_JULY_23_MS;running=false}else{base=(Number(data.totalTodayMs)||0)+baseline();running=Boolean(data.running)}fetched=Date.now();errorEl.hidden=true;setState(running);tick()}catch(e){errorEl.hidden=false;errorEl.textContent=e.message;setState(false)}finally{button.disabled=false;button.textContent='↻ Refresh'}}
+button.addEventListener('click',refresh);setInterval(tick,1000);setInterval(refresh,300000);refresh();
+</script>
 </body>
 </html>
