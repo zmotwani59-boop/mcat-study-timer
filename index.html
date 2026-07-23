@@ -54,6 +54,7 @@
     .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; background: currentColor; vertical-align: 1px; }
     button { margin-top: 14px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; }
     button:hover { background: var(--border); }
+    button:disabled { cursor: wait; opacity: .65; }
     .error { color: #b54848; font-size: 13px; margin-top: 12px; max-width: 560px; overflow-wrap: anywhere; }
   </style>
 </head>
@@ -94,6 +95,8 @@
       timerEl.textContent = formatElapsed(estimatedNowMs() - new Date(activeStart).getTime());
     }
     async function refresh() {
+      refreshButton.disabled = true;
+      refreshButton.textContent = "Refreshing…";
       try {
         const response = await fetch("/api/timer", { cache: "no-store" });
         const data = await response.json();
@@ -116,11 +119,14 @@
         errorEl.hidden = false;
         errorEl.textContent = error.message;
         statusEl.innerHTML = '<span class="dot"></span>Could not reach Clockify';
+      } finally {
+        refreshButton.disabled = false;
+        refreshButton.textContent = "Refresh now";
       }
     }
     refreshButton.addEventListener("click", refresh);
     setInterval(tick, 1000);
-    setInterval(refresh, 180000);
+    setInterval(refresh, 300000);
     refresh();
   </script>
 </body>
