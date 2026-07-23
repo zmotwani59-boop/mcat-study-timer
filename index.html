@@ -92,6 +92,18 @@
       return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
     }
 
+    function migrationBaselineMs() {
+      const date = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+      // Circulatory System 2 + Memory + Conditioning occurred before Clockify
+      // was connected. Apply this once for Thursday, July 23, 2026 only.
+      return date === "2026-07-23" ? 12392000 : 0;
+    }
+
     function tick() {
       const liveExtra = running ? Date.now() - fetchedAtMs : 0;
       timerEl.textContent = formatElapsed(baseTotalMs + liveExtra);
@@ -134,7 +146,7 @@
           localStorage.setItem("clockifyTimerWorkspaceId", data.workspaceId);
         }
 
-        baseTotalMs = Number(data.totalTodayMs) || 0;
+        baseTotalMs = (Number(data.totalTodayMs) || 0) + migrationBaselineMs();
         running = Boolean(data.running);
         fetchedAtMs = Date.now();
         errorEl.hidden = true;
