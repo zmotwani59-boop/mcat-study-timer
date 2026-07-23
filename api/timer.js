@@ -73,20 +73,65 @@ async function getRunningEntry(base, workspaceId, userId, headers) {
   return { ...result, entry };
 }
 
-function validUserId(value) {
+function validId(value) {
   return /^[A-Za-z0-9_-]{6,}$/.test(String(value || ""));
+}
+
+function uniqueWorkspaceCandidates(workspaces, user, preferredWorkspaceId) {
+  const byId = new Map();
+
+  for (const workspace of workspaces) {
+    if (workspace?.id) byId.set(workspace.id, workspace);
+  }
+
+  for (const id of [
+    preferredWorkspaceId,
+    user?.activeWorkspace,
+    user?.defaultWorkspace,
+  ]) {
+    if (id && !byId.has(id)) {
+      byId.set(id, { id, name: null });
+    }
+  }
+
+  const priority = [
+    preferredWorkspaceId,
+    user?.activeWorkspace,
+    user?.defaultWorkspace,
+  ].filter(Boolean);
+
+  return [...byId.values()].sort((a, b) => {
+    const ai = priority.indexOf(a.id);
+    const bi = priority.indexOf(b.id);
+    const ar = ai === -1 ? Number.MAX_SAFE_INTEGER : ai;
+    const br = bi === -1 ? Number.MAX_SAFE_INTEGER : bi;
+    return ar - br;
+  });
+}
+
+function successPayload({ entry, region, userId, workspace }) {
+  return {
+    running: Boolean(entry?.timeInterval?.start),
+    description: entry?.description || null,
+    start: entry?.timeInterval?.start || null,
+    serverNow: new Date().toISOString(),
+    region: region.id,
+    regionLabel: region.label,
+    userId,
+    workspaceId: workspace.id,
+    workspaceName: workspace.name || null,
+  };
 }
 
 export default async function handler(request, response) {
   response.setHeader("Cache-Control", "no-store, max-age=0");
 
   const apiKey = process.env.CLOCKIFY_API_KEY;
-  const workspaceId = process.env.CLOCKIFY_WORKSPACE_ID;
+  const preferredWorkspaceId = process.env.CLOCKIFY_WORKSPACE_ID;
 
-  if (!apiKey || !workspaceId) {
+  if (!apiKey) {
     return response.status(500).json({
-      error:
-        "Missing CLOCKIFY_API_KEY or CLOCKIFY_WORKSPACE_ID in Vercel environment variables.",
+      error: "Missing CLOCKIFY_API_KEY in Vercel environment variables.",
     });
   }
 
@@ -96,46 +141,70 @@ export default async function handler(request, response) {
   };
 
   const regions = buildRegions();
-  const regionMap = Object.fromEntries(regions.map((region) => [region.id, region]));
+  const regionMap = Object.fromEntries(
+    regions.map((region) => [region.id, region])
+  );
+
   const savedRegion = regionMap[String(request.query?.region || "")];
   const savedUserId = String(request.query?.user || "");
+  const savedWorkspaceId = String(request.query?.workspace || "");
 
   try {
-    // Fast path after the browser has remembered the working region and user ID.
-    if (savedRegion && validUserId(savedUserId)) {
+    // Fast path: one Clockify request after the widget remembers its working
+    // region, user, and workspace.
+    if (
+      savedRegion &&
+      validId(savedUserId) &&
+      validId(savedWorkspaceId)
+    ) {
       const timerResult = await getRunningEntry(
         savedRegion.base,
-        workspaceId,
+        savedWorkspaceId,
         savedUserId,
         headers
       );
 
       if (timerResult.ok) {
-        const entry = timerResult.entry;
-        return response.status(200).json({
-          running: Boolean(entry?.timeInterval?.start),
-          description: entry?.description || null,
-          start: entry?.timeInterval?.start || null,
-          serverNow: new Date().toISOString(),
-          region: savedRegion.id,
-          regionLabel: savedRegion.label,
-          userId: savedUserId,
-        });
+        return response.status(200).json(
+          successPayload({
+            entry: timerResult.entry,
+            region: savedRegion,
+            userId: savedUserId,
+            workspace: { id: savedWorkspaceId, name: null },
+          })
+        );
       }
     }
 
     const diagnostics = [];
 
-    // Discover which Clockify data region owns the workspace. Clockify API keys
-    // and workspace IDs are region-specific, so a correct key can still receive
-    // Access Denied from the global endpoint when the workspace is regional.
+    // Locate the data region accepted by the API key, discover every workspace
+    // available to that user, then find the workspace that contains a running
+    // timer. CLOCKIFY_WORKSPACE_ID is only a preference and is no longer
+    // required or trusted as the source of truth.
     for (const region of regions) {
-      const workspacesResult = await requestJson(`${region.base}/workspaces`, headers);
+      const userResult = await requestJson(`${region.base}/user`, headers);
+
+      if (!userResult.ok || !userResult.data?.id) {
+        diagnostics.push({
+          region: region.id,
+          userStatus: userResult.status,
+        });
+        continue;
+      }
+
+      const user = userResult.data;
+      const userId = user.id;
+      const workspacesResult = await requestJson(
+        `${region.base}/workspaces`,
+        headers
+      );
 
       if (!workspacesResult.ok) {
         diagnostics.push({
           region: region.id,
-          workspaceStatus: workspacesResult.status,
+          userStatus: 200,
+          workspacesStatus: workspacesResult.status,
         });
         continue;
       }
@@ -143,72 +212,74 @@ export default async function handler(request, response) {
       const workspaces = Array.isArray(workspacesResult.data)
         ? workspacesResult.data
         : [];
-      const workspace = workspaces.find((item) => item?.id === workspaceId);
-
-      if (!workspace) {
-        diagnostics.push({
-          region: region.id,
-          workspaceStatus: 200,
-          workspaceMatched: false,
-        });
-        continue;
-      }
-
-      const userResult = await requestJson(`${region.base}/user`, headers);
-
-      if (!userResult.ok || !userResult.data?.id) {
-        diagnostics.push({
-          region: region.id,
-          workspaceMatched: true,
-          userStatus: userResult.status,
-        });
-        continue;
-      }
-
-      const userId = userResult.data.id;
-      const timerResult = await getRunningEntry(
-        region.base,
-        workspaceId,
-        userId,
-        headers
+      const candidates = uniqueWorkspaceCandidates(
+        workspaces,
+        user,
+        preferredWorkspaceId
       );
 
-      if (!timerResult.ok) {
+      if (!candidates.length) {
         diagnostics.push({
           region: region.id,
-          workspaceMatched: true,
-          timerStatus: timerResult.status,
-          timerDetail: timerResult.text,
+          userStatus: 200,
+          workspacesStatus: 200,
+          workspaceCount: 0,
         });
         continue;
       }
 
-      const entry = timerResult.entry;
-      return response.status(200).json({
-        running: Boolean(entry?.timeInterval?.start),
-        description: entry?.description || null,
-        start: entry?.timeInterval?.start || null,
-        serverNow: new Date().toISOString(),
-        region: region.id,
-        regionLabel: region.label,
-        userId,
-      });
-    }
+      let firstReadableWorkspace = null;
 
-    const matchedWorkspace = diagnostics.find((item) => item.workspaceMatched);
+      for (const workspace of candidates) {
+        const timerResult = await getRunningEntry(
+          region.base,
+          workspace.id,
+          userId,
+          headers
+        );
 
-    if (matchedWorkspace?.timerStatus === 403) {
-      return response.status(403).json({
-        error:
-          "Clockify found this workspace but denied access to its time entries. Regenerate the API key while logged into the same Clockify account that owns the timer, then replace CLOCKIFY_API_KEY in Vercel and redeploy.",
-        resetConnection: true,
-        diagnostics,
-      });
+        if (!timerResult.ok) {
+          diagnostics.push({
+            region: region.id,
+            workspaceId: workspace.id,
+            timerStatus: timerResult.status,
+          });
+          continue;
+        }
+
+        if (!firstReadableWorkspace) {
+          firstReadableWorkspace = { workspace, timerResult };
+        }
+
+        if (timerResult.entry) {
+          return response.status(200).json(
+            successPayload({
+              entry: timerResult.entry,
+              region,
+              userId,
+              workspace,
+            })
+          );
+        }
+      }
+
+      // The API key and region work, but there is no running timer right now.
+      // Remember a readable workspace so future checks use the one-request path.
+      if (firstReadableWorkspace) {
+        return response.status(200).json(
+          successPayload({
+            entry: null,
+            region,
+            userId,
+            workspace: firstReadableWorkspace.workspace,
+          })
+        );
+      }
     }
 
     return response.status(403).json({
       error:
-        "The Clockify API key could not access the configured workspace in Global, USA, EU, UK, or Australia. Check that the API key and workspace ID belong to the same Clockify account.",
+        "Clockify accepted neither the API key nor any workspace available to that key. Regenerate the API key in Clockify Preferences → Advanced while logged into the same email used by Make, replace CLOCKIFY_API_KEY in Vercel, and redeploy.",
       resetConnection: true,
       diagnostics,
     });
