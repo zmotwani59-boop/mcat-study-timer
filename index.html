@@ -3,76 +3,230 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MCAT Study Timer</title>
+  <title>Total Study Time Today</title>
   <style>
     :root {
-      color-scheme: light dark;
-      --bg: #f7f5f2;
-      --card: rgba(255,255,255,.82);
-      --text: #262321;
-      --muted: #6f6a66;
-      --border: rgba(38,35,33,.12);
-      --shadow: 0 14px 40px rgba(38,35,33,.10);
+      color-scheme: light;
+      --ink: #22324a;
+      --muted: #6f7f96;
+      --blue: #5d7ee5;
+      --blue-dark: #405fbf;
+      --blue-soft: #eef3ff;
+      --cream: #fffdf8;
+      --line: rgba(83, 112, 190, .18);
+      --shadow: 0 18px 44px rgba(79, 101, 166, .16);
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #191919;
-        --card: rgba(38,38,38,.88);
-        --text: #f1efed;
-        --muted: #aaa39d;
-        --border: rgba(255,255,255,.10);
-        --shadow: 0 14px 40px rgba(0,0,0,.25);
-      }
-    }
+
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; margin: 0; }
+
     body {
       display: grid;
       place-items: center;
-      padding: 14px;
-      background: radial-gradient(circle at top left, rgba(255,255,255,.35), transparent 36%), var(--bg);
-      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--text);
+      padding: 6px;
+      background: transparent;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
     }
+
     .card {
+      position: relative;
       width: min(100%, 720px);
-      min-height: 230px;
-      display: grid;
-      place-items: center;
-      text-align: center;
-      padding: 28px;
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      background: var(--card);
+      min-height: 250px;
+      overflow: hidden;
+      padding: 24px 26px 20px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at 12% 10%, rgba(126, 151, 232, .22), transparent 30%),
+        radial-gradient(circle at 90% 90%, rgba(177, 193, 245, .28), transparent 34%),
+        linear-gradient(145deg, #fffdf9 0%, #f8faff 100%);
       box-shadow: var(--shadow);
-      backdrop-filter: blur(12px);
     }
-    .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
-    .task { min-height: 28px; font-size: clamp(18px, 3vw, 28px); font-weight: 650; line-height: 1.2; margin-bottom: 18px; overflow-wrap: anywhere; }
-    .timer { font-variant-numeric: tabular-nums; font-size: clamp(50px, 11vw, 94px); font-weight: 750; letter-spacing: -.055em; line-height: .95; }
-    .status { margin-top: 18px; font-size: 14px; color: var(--muted); }
-    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; background: currentColor; vertical-align: 1px; }
-    button { margin-top: 14px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; }
-    button:hover { background: var(--border); }
-    button:disabled { cursor: wait; opacity: .65; }
-    .error { color: #b54848; font-size: 13px; margin-top: 12px; max-width: 560px; overflow-wrap: anywhere; }
+
+    .card::before,
+    .card::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      pointer-events: none;
+    }
+
+    .card::before {
+      width: 110px;
+      height: 110px;
+      top: -58px;
+      right: 18px;
+      border: 18px solid rgba(96, 126, 220, .08);
+    }
+
+    .card::after {
+      width: 74px;
+      height: 74px;
+      bottom: -40px;
+      left: -12px;
+      background: rgba(123, 149, 232, .10);
+    }
+
+    .topline {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 27px;
+    }
+
+    .label {
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+      color: #536b9d;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 29px;
+      padding: 6px 11px;
+      border: 1px solid rgba(77, 107, 196, .16);
+      border-radius: 999px;
+      background: rgba(255,255,255,.72);
+      color: var(--blue-dark);
+      font-size: 12px;
+      font-weight: 750;
+      box-shadow: 0 5px 16px rgba(83, 112, 190, .08);
+      backdrop-filter: blur(8px);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: #75a487;
+      box-shadow: 0 0 0 4px rgba(117, 164, 135, .12);
+    }
+
+    .badge.running .dot {
+      animation: pulse 1.9s ease-out infinite;
+    }
+
+    .badge.paused .dot {
+      background: #a2aabc;
+      box-shadow: 0 0 0 4px rgba(162, 170, 188, .14);
+      animation: none;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(117, 164, 135, .30); }
+      70% { box-shadow: 0 0 0 8px rgba(117, 164, 135, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(117, 164, 135, 0); }
+    }
+
+    .timer-wrap {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+    }
+
+    .timer {
+      font-variant-numeric: tabular-nums;
+      font-size: clamp(54px, 11vw, 88px);
+      font-weight: 780;
+      letter-spacing: -.055em;
+      line-height: .95;
+      color: #314d9c;
+      text-shadow: 0 3px 18px rgba(84, 111, 198, .12);
+    }
+
+    .subtitle {
+      margin-top: 13px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .footer {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 33px;
+      margin-top: 19px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid rgba(70, 101, 193, .18);
+      border-radius: 999px;
+      padding: 7px 12px;
+      background: rgba(255,255,255,.66);
+      color: #5870b3;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      background: #fff;
+      border-color: rgba(70, 101, 193, .28);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: .58;
+      transform: none;
+    }
+
+    .error {
+      margin-top: 10px;
+      text-align: center;
+      color: #a64848;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 470px) {
+      .card { min-height: 225px; padding: 20px 18px 17px; border-radius: 20px; }
+      .topline { margin-bottom: 24px; }
+      .label { font-size: 10px; letter-spacing: .11em; }
+      .badge { min-height: 27px; padding: 5px 9px; font-size: 11px; }
+      .subtitle { font-size: 12px; }
+    }
   </style>
 </head>
 <body>
   <main class="card" aria-live="polite">
-    <div>
-      <div class="eyebrow">Total Study Time Today</div>
-      <div id="task" class="task">Checking Clockify…</div>
-      <div id="timer" class="timer">00:00:00</div>
-      <div id="status" class="status"><span class="dot"></span>Connecting</div>
-      <button id="refreshButton" type="button">Refresh now</button>
-      <div id="error" class="error" hidden></div>
+    <div class="topline">
+      <div class="label">Total Study Time Today</div>
+      <div id="statusBadge" class="badge paused"><span class="dot"></span><span id="statusText">Connecting</span></div>
     </div>
+
+    <div class="timer-wrap">
+      <div id="timer" class="timer">00:00:00</div>
+      <div class="subtitle">Zahra’s active study time, updated live</div>
+    </div>
+
+    <div class="footer">
+      <button id="refreshButton" type="button">↻ Refresh</button>
+    </div>
+
+    <div id="error" class="error" hidden></div>
   </main>
+
   <script>
-    const taskEl = document.getElementById("task");
     const timerEl = document.getElementById("timer");
-    const statusEl = document.getElementById("status");
+    const statusBadge = document.getElementById("statusBadge");
+    const statusText = document.getElementById("statusText");
     const errorEl = document.getElementById("error");
     const refreshButton = document.getElementById("refreshButton");
 
@@ -100,9 +254,8 @@
         day: "2-digit",
       }).format(new Date());
 
-      // Only Circulatory System 2 and Memory occurred before Clockify had a
-      // backdated entry. Conditioning and all later blocks are already present
-      // in Clockify and must not be added again.
+      // Only Circulatory System 2 and Memory happened before Clockify had a
+      // backdated entry. Conditioning and later blocks already exist there.
       return date === "2026-07-23" ? 4052000 : 0;
     }
 
@@ -133,6 +286,12 @@
       localStorage.removeItem("clockifyTimerWorkspaceId");
     }
 
+    function setStatus(isRunning) {
+      statusBadge.classList.toggle("running", isRunning);
+      statusBadge.classList.toggle("paused", !isRunning);
+      statusText.textContent = isRunning ? "Live" : "Paused";
+    }
+
     async function refresh() {
       refreshButton.disabled = true;
       refreshButton.textContent = "Refreshing…";
@@ -156,26 +315,17 @@
         running = Boolean(data.running);
         fetchedAtMs = Date.now();
         errorEl.hidden = true;
-
-        const regionText = data.regionLabel ? ` · ${data.regionLabel}` : "";
-        const workspaceText = data.workspaceName ? ` · ${data.workspaceName}` : "";
-
-        if (running) {
-          taskEl.textContent = data.description || "Studying";
-          statusEl.innerHTML = `<span class="dot"></span>Studying now${workspaceText}${regionText}`;
-        } else {
-          taskEl.textContent = "On break";
-          statusEl.innerHTML = `<span class="dot"></span>Total paused${workspaceText}${regionText}`;
-        }
-
+        setStatus(running);
         tick();
       } catch (error) {
         errorEl.hidden = false;
         errorEl.textContent = error.message;
-        statusEl.innerHTML = '<span class="dot"></span>Could not reach Clockify';
+        statusBadge.classList.remove("running");
+        statusBadge.classList.add("paused");
+        statusText.textContent = "Offline";
       } finally {
         refreshButton.disabled = false;
-        refreshButton.textContent = "Refresh now";
+        refreshButton.textContent = "↻ Refresh";
       }
     }
 
