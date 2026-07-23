@@ -99,9 +99,11 @@
         month: "2-digit",
         day: "2-digit",
       }).format(new Date());
-      // Circulatory System 2 + Memory + Conditioning occurred before Clockify
-      // was connected. Apply this once for Thursday, July 23, 2026 only.
-      return date === "2026-07-23" ? 12392000 : 0;
+
+      // Only Circulatory System 2 and Memory occurred before Clockify had a
+      // backdated entry. Conditioning and all later blocks are already present
+      // in Clockify and must not be added again.
+      return date === "2026-07-23" ? 4052000 : 0;
     }
 
     function tick() {
@@ -114,11 +116,13 @@
       const userId = localStorage.getItem("clockifyTimerUserId");
       const workspaceId = localStorage.getItem("clockifyTimerWorkspaceId");
       const params = new URLSearchParams();
+
       if (region && userId && workspaceId) {
         params.set("region", region);
         params.set("user", userId);
         params.set("workspace", workspaceId);
       }
+
       const query = params.toString();
       return query ? `/api/timer?${query}` : "/api/timer";
     }
@@ -132,9 +136,11 @@
     async function refresh() {
       refreshButton.disabled = true;
       refreshButton.textContent = "Refreshing…";
+
       try {
         const response = await fetch(getTimerUrl(), { cache: "no-store" });
         const data = await response.json();
+
         if (!response.ok) {
           if (data.resetConnection) clearSavedConnection();
           throw new Error(data.error || `Widget API returned ${response.status}`);
@@ -161,6 +167,7 @@
           taskEl.textContent = "On break";
           statusEl.innerHTML = `<span class="dot"></span>Total paused${workspaceText}${regionText}`;
         }
+
         tick();
       } catch (error) {
         errorEl.hidden = false;
