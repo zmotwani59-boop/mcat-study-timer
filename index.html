@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MCAT Study Timer</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f5f2;
+      --card: rgba(255,255,255,.82);
+      --text: #262321;
+      --muted: #6f6a66;
+      --border: rgba(38,35,33,.12);
+      --shadow: 0 14px 40px rgba(38,35,33,.10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #191919;
+        --card: rgba(38,38,38,.88);
+        --text: #f1efed;
+        --muted: #aaa39d;
+        --border: rgba(255,255,255,.10);
+        --shadow: 0 14px 40px rgba(0,0,0,.25);
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      padding: 14px;
+      background: radial-gradient(circle at top left, rgba(255,255,255,.35), transparent 36%), var(--bg);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+    }
+    .card {
+      width: min(100%, 720px);
+      min-height: 230px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 28px;
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+    .task { min-height: 28px; font-size: clamp(18px, 3vw, 28px); font-weight: 650; line-height: 1.2; margin-bottom: 18px; overflow-wrap: anywhere; }
+    .timer { font-variant-numeric: tabular-nums; font-size: clamp(50px, 11vw, 94px); font-weight: 750; letter-spacing: -.055em; line-height: .95; }
+    .status { margin-top: 18px; font-size: 14px; color: var(--muted); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; background: currentColor; vertical-align: 1px; }
+    button { margin-top: 14px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; }
+    button:hover { background: var(--border); }
+    .error { color: #b54848; font-size: 13px; margin-top: 12px; max-width: 560px; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main class="card" aria-live="polite">
+    <div>
+      <div class="eyebrow">MCAT Study Timer</div>
+      <div id="task" class="task">Checking Clockify…</div>
+      <div id="timer" class="timer">00:00:00</div>
+      <div id="status" class="status"><span class="dot"></span>Connecting</div>
+      <button id="refreshButton" type="button">Refresh now</button>
+      <div id="error" class="error" hidden></div>
+    </div>
+  </main>
+  <script>
+    const taskEl = document.getElementById("task");
+    const timerEl = document.getElementById("timer");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const refreshButton = document.getElementById("refreshButton");
+    let activeStart = null;
+    let lastServerNow = null;
+    let fetchedAtMs = null;
+    function pad(n) { return String(Math.max(0, Math.floor(n))).padStart(2, "0"); }
+    function formatElapsed(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    function estimatedNowMs() {
+      if (!lastServerNow || !fetchedAtMs) return Date.now();
+      return new Date(lastServerNow).getTime() + (Date.now() - fetchedAtMs);
+    }
+    function tick() {
+      if (!activeStart) { timerEl.textContent = "00:00:00"; return; }
+      timerEl.textContent = formatElapsed(estimatedNowMs() - new Date(activeStart).getTime());
+    }
+    async function refresh() {
+      try {
+        const response = await fetch("/api/timer", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Widget API returned ${response.status}`);
+        lastServerNow = data.serverNow;
+        fetchedAtMs = Date.now();
+        errorEl.hidden = true;
+        if (data.running && data.start) {
+          activeStart = data.start;
+          taskEl.textContent = data.description || "Studying";
+          statusEl.innerHTML = '<span class="dot"></span>Studying now';
+          tick();
+        } else {
+          activeStart = null;
+          taskEl.textContent = "On break";
+          timerEl.textContent = "00:00:00";
+          statusEl.innerHTML = '<span class="dot"></span>No running Clockify timer';
+        }
+      } catch (error) {
+        errorEl.hidden = false;
+        errorEl.textContent = error.message;
+        statusEl.innerHTML = '<span class="dot"></span>Could not reach Clockify';
+      }
+    }
+    refreshButton.addEventListener("click", refresh);
+    setInterval(tick, 1000);
+    setInterval(refresh, 180000);
+    refresh();
+  </script>
+</body>
+</html>
