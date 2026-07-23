@@ -75,10 +75,15 @@
     const statusEl = document.getElementById("status");
     const errorEl = document.getElementById("error");
     const refreshButton = document.getElementById("refreshButton");
+
     let activeStart = null;
     let lastServerNow = null;
     let fetchedAtMs = null;
-    function pad(n) { return String(Math.max(0, Math.floor(n))).padStart(2, "0"); }
+
+    function pad(n) {
+      return String(Math.max(0, Math.floor(n))).padStart(2, "0");
+    }
+
     function formatElapsed(ms) {
       const total = Math.max(0, Math.floor(ms / 1000));
       const hours = Math.floor(total / 3600);
@@ -86,34 +91,75 @@
       const seconds = total % 60;
       return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
     }
+
     function estimatedNowMs() {
       if (!lastServerNow || !fetchedAtMs) return Date.now();
       return new Date(lastServerNow).getTime() + (Date.now() - fetchedAtMs);
     }
+
     function tick() {
-      if (!activeStart) { timerEl.textContent = "00:00:00"; return; }
-      timerEl.textContent = formatElapsed(estimatedNowMs() - new Date(activeStart).getTime());
+      if (!activeStart) {
+        timerEl.textContent = "00:00:00";
+        return;
+      }
+      timerEl.textContent = formatElapsed(
+        estimatedNowMs() - new Date(activeStart).getTime()
+      );
     }
+
+    function getTimerUrl() {
+      const region = localStorage.getItem("clockifyTimerRegion");
+      const userId = localStorage.getItem("clockifyTimerUserId");
+      const params = new URLSearchParams();
+
+      if (region && userId) {
+        params.set("region", region);
+        params.set("user", userId);
+      }
+
+      const query = params.toString();
+      return query ? `/api/timer?${query}` : "/api/timer";
+    }
+
+    function clearSavedConnection() {
+      localStorage.removeItem("clockifyTimerRegion");
+      localStorage.removeItem("clockifyTimerUserId");
+    }
+
     async function refresh() {
       refreshButton.disabled = true;
       refreshButton.textContent = "Refreshing…";
+
       try {
-        const response = await fetch("/api/timer", { cache: "no-store" });
+        const response = await fetch(getTimerUrl(), { cache: "no-store" });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || `Widget API returned ${response.status}`);
+
+        if (!response.ok) {
+          if (data.resetConnection) clearSavedConnection();
+          throw new Error(data.error || `Widget API returned ${response.status}`);
+        }
+
+        if (data.region && data.userId) {
+          localStorage.setItem("clockifyTimerRegion", data.region);
+          localStorage.setItem("clockifyTimerUserId", data.userId);
+        }
+
         lastServerNow = data.serverNow;
         fetchedAtMs = Date.now();
         errorEl.hidden = true;
+
+        const regionText = data.regionLabel ? ` · ${data.regionLabel}` : "";
+
         if (data.running && data.start) {
           activeStart = data.start;
           taskEl.textContent = data.description || "Studying";
-          statusEl.innerHTML = '<span class="dot"></span>Studying now';
+          statusEl.innerHTML = `<span class="dot"></span>Studying now${regionText}`;
           tick();
         } else {
           activeStart = null;
           taskEl.textContent = "On break";
           timerEl.textContent = "00:00:00";
-          statusEl.innerHTML = '<span class="dot"></span>No running Clockify timer';
+          statusEl.innerHTML = `<span class="dot"></span>No running Clockify timer${regionText}`;
         }
       } catch (error) {
         errorEl.hidden = false;
@@ -124,6 +170,7 @@
         refreshButton.textContent = "Refresh now";
       }
     }
+
     refreshButton.addEventListener("click", refresh);
     setInterval(tick, 1000);
     setInterval(refresh, 300000);
