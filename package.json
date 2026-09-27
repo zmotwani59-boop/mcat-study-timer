@@ -1,8 +1,8 @@
 {
-  "name": "clockify-notion-widget",
+  "name": "zahra-hq-google-bridge",
   "version": "1.0.0",
   "private": true,
-  "engines": {
-    "node": "22.x"
-  }
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.21.2", "googleapis": "^144.0.0" }
 }
