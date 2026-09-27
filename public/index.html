@@ -609,12 +609,22 @@ function normalizeState(s){
   out.recoveryVersion = out.recoveryVersion || '';
   return out;
 }
-function loadState(){ try{ const raw = localStorage.getItem(DB_KEY); if(raw){ const s=JSON.parse(raw); if(s.version===2) return normalizeState(s); } }catch(e){} const s=seed(); localStorage.setItem(DB_KEY, JSON.stringify(s)); return s; }
+let storageAvailable=true;
+function safeStorageGet(key){ try{ return window.localStorage.getItem(key); }catch(e){ storageAvailable=false; return null; } }
+function safeStorageSet(key,value){ try{ window.localStorage.setItem(key,value); return true; }catch(e){ storageAvailable=false; return false; } }
+function safeStorageRemove(key){ try{ window.localStorage.removeItem(key); return true; }catch(e){ storageAvailable=false; return false; } }
+function loadState(){
+  try{
+    const raw=safeStorageGet(DB_KEY);
+    if(raw){ const s=JSON.parse(raw); if(s.version===2) return normalizeState(s); }
+  }catch(e){}
+  const s=seed(); safeStorageSet(DB_KEY, JSON.stringify(s)); return s;
+}
 let state = loadState();
 let cloudSaveTimer;
 function save(){
   state.updatedAt=new Date().toISOString();
-  localStorage.setItem(DB_KEY, JSON.stringify(state));
+  safeStorageSet(DB_KEY, JSON.stringify(state));
   if(state.integrations?.cloud?.connected && appsScriptBridgeAvailable()){
     clearTimeout(cloudSaveTimer);
     cloudSaveTimer=setTimeout(()=>pushCloudState(),1200);
@@ -1970,7 +1980,7 @@ document.getElementById('backup-input').addEventListener('change', e=>{
 });
 function resetToStarter(){
   if(!confirm('Reset local Zahra HQ to starter data? This deletes current data in this browser.')) return;
-  localStorage.removeItem(DB_KEY); state = loadState(); render(); toast('Reset to starter data');
+  safeStorageRemove(DB_KEY); state = loadState(); render(); toast('Reset to starter data');
 }
 
 /* =========================================================================
