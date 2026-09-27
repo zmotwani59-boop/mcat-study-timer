@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const { google } = require('googleapis');
 
 const app = express();
@@ -50,7 +51,6 @@ function validOAuthState(state){
 }
 
 app.use(express.json({ limit: '5mb' }));
-app.use(express.static('public', { extensions:['html'] }));
 app.use((req,res,next)=>{
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Headers','Content-Type, X-ZHQ-Connection');
@@ -58,6 +58,16 @@ app.use((req,res,next)=>{
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
+
+// Frontend and backend are one Node/Express service on Render (same-origin).
+// index.html lives next to server.js at the project root — there is no build
+// step and no /public folder, so `express.static('public', ...)` was serving
+// nothing and GET / was falling through to Express's default 404. That is
+// almost certainly the root cause of the "blank / not rendering" reports:
+// depending on caching, some requests would show a stale prior deploy while
+// fresh ones hit an empty response. Serve the single HTML file explicitly.
+const INDEX_HTML = path.join(__dirname, 'index.html');
+app.get('/', (_req, res) => res.sendFile(INDEX_HTML));
 
 function makeOAuth(){
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, `${BASE_URL}/auth/google/callback`);
@@ -67,6 +77,18 @@ function authForCode(code){
   if(!tokens) return null;
   const c=makeOAuth(); c.setCredentials(tokens); return c;
 }
+// Token refresh audit: the connection token is self-contained (it seals the
+// original access_token + refresh_token, not a server-side session id). That
+// is fine for refresh: since `access_type:'offline'` + `prompt:'consent'` are
+// used at /auth/google, the refresh_token is long-lived, and googleapis
+// transparently refreshes an expired access_token on-demand for any client
+// built from it (it checks expiry before each API call and calls the token
+// endpoint using the refresh_token already present in `tokens`). Each request
+// reconstructs its own OAuth2 client from the same refresh_token, so refreshed
+// access_tokens don't need to be written back anywhere for requests to keep
+// working — the refresh_token itself is what's durable, and it's already
+// persisted (sealed in the token the browser holds). No server-side session
+// store is required for this to keep functioning.
 function requireConnection(req,res,next){
   const code=req.get('X-ZHQ-Connection')||'';
   const auth=authForCode(code);
@@ -149,18 +171,77 @@ app.post('/api/waiting-email-matches',requireConnection,async(req,res)=>{
 const STATE_NAME='Zahra HQ State.json';
 async function stateFile(drive){const r=await drive.files.list({q:`name='${STATE_NAME}' and trashed=false`,fields:'files(id,name,modifiedTime)',pageSize:10});return (r.data.files||[])[0]||null;}
 app.get('/api/state',requireConnection,async(req,res)=>{
-  try{const drive=google.drive({version:'v3',auth:req.googleAuth});const f=await stateFile(drive);if(!f)return res.json({ok:true,state:null});const r=await drive.files.get({fileId:f.id,alt:'media'},{responseType:'text'});res.json({ok:true,state:typeof r.data==='string'?JSON.parse(r.data):r.data,modifiedTime:f.modifiedTime});}catch(e){console.error(e);res.status(500).json({ok:false,error:'state_load_failed'});}
+  try{
+    const drive=google.drive({version:'v3',auth:req.googleAuth});
+    const f=await stateFile(drive);
+    if(!f)return res.json({ok:true,state:null});
+    const r=await drive.files.get({fileId:f.id,alt:'media'},{responseType:'text'});
+    res.json({ok:true,state:typeof r.data==='string'?JSON.parse(r.data):r.data,modifiedTime:f.modifiedTime});
+  }catch(e){console.error(e);res.status(500).json({ok:false,error:'state_load_failed'});}
 });
 app.post('/api/state',requireConnection,async(req,res)=>{
-  try{const drive=google.drive({version:'v3',auth:req.googleAuth});const f=await stateFile(drive);const media={mimeType:'application/json',body:JSON.stringify(req.body?.state||{},null,2)};let id;if(f){await drive.files.update({fileId:f.id,media});id=f.id;}else{const c=await drive.files.create({requestBody:{name:STATE_NAME,mimeType:'application/json'},media,fields:'id'});id=c.data.id;}res.json({ok:true,id});}catch(e){console.error(e);res.status(500).json({ok:false,error:'state_save_failed'});}
+  try{
+    const drive=google.drive({version:'v3',auth:req.googleAuth});
+    const f=await stateFile(drive);
+    const media={mimeType:'application/json',body:JSON.stringify(req.body?.state||{},null,2)};
+    let id;
+    if(f){await drive.files.update({fileId:f.id,media});id=f.id;}
+    else{
+      const c=await drive.files.create({requestBody:{name:STATE_NAME,mimeType:'application/json'},media,fields:'id'});
+      id=c.data.id;
+    }
+    res.json({ok:true,id});
+  }catch(e){console.error(e);res.status(500).json({ok:false,error:'state_save_failed'});}
 });
 
-function googleId(url){const s=String(url||'');for(const p of [/\/d\/([A-Za-z0-9_-]+)/,/[?&]id=([A-Za-z0-9_-]+)/,/spreadsheets\/d\/([A-Za-z0-9_-]+)/]){const m=s.match(p);if(m)return m[1];}return '';}
+function googleId(url){
+  const s=String(url||'');
+  for(const p of [/\/d\/([A-Za-z0-9_-]+)/,/[?&]id=([A-Za-z0-9_-]+)/,/spreadsheets\/d\/([A-Za-z0-9_-]+)/]){
+    const m=s.match(p);if(m)return m[1];
+  }
+  return '';
+}
 app.post('/api/drive/read',requireConnection,async(req,res)=>{
-  try{const id=googleId(req.body?.url);if(!id)return res.status(400).json({ok:false,error:'invalid_google_url'});const drive=google.drive({version:'v3',auth:req.googleAuth});const meta=await drive.files.get({fileId:id,fields:'id,name,mimeType,webViewLink'});let preview='';if(meta.data.mimeType==='application/vnd.google-apps.document'){const r=await drive.files.export({fileId:id,mimeType:'text/plain'},{responseType:'text'});preview=String(r.data||'');}else if(meta.data.mimeType==='application/vnd.google-apps.spreadsheet'){return res.json({ok:true,type:'Sheets',name:meta.data.name,url:meta.data.webViewLink||req.body.url,spreadsheetId:id,preview:'Open with the Sheets importer for a bounded preview.'});}else if(String(meta.data.mimeType||'').startsWith('text/')||meta.data.mimeType==='application/json'){const r=await drive.files.get({fileId:id,alt:'media'},{responseType:'text'});preview=String(r.data||'');}else preview=`File type: ${meta.data.mimeType||'unknown'}`;res.json({ok:true,type:'Drive',name:meta.data.name,url:meta.data.webViewLink||req.body.url,preview:preview.slice(0,12000)});}catch(e){console.error(e);res.status(500).json({ok:false,error:'drive_read_failed'});}
+  try{
+    const id=googleId(req.body?.url);
+    if(!id)return res.status(400).json({ok:false,error:'invalid_google_url'});
+    const drive=google.drive({version:'v3',auth:req.googleAuth});
+    const meta=await drive.files.get({fileId:id,fields:'id,name,mimeType,webViewLink'});
+    let preview='';
+    if(meta.data.mimeType==='application/vnd.google-apps.document'){
+      const r=await drive.files.export({fileId:id,mimeType:'text/plain'},{responseType:'text'});
+      preview=String(r.data||'');
+    }else if(meta.data.mimeType==='application/vnd.google-apps.spreadsheet'){
+      return res.json({ok:true,type:'Sheets',name:meta.data.name,url:meta.data.webViewLink||req.body.url,spreadsheetId:id,preview:'Open with the Sheets importer for a bounded preview.'});
+    }else if(String(meta.data.mimeType||'').startsWith('text/')||meta.data.mimeType==='application/json'){
+      const r=await drive.files.get({fileId:id,alt:'media'},{responseType:'text'});
+      preview=String(r.data||'');
+    }else preview=`File type: ${meta.data.mimeType||'unknown'}`;
+    res.json({ok:true,type:'Drive',name:meta.data.name,url:meta.data.webViewLink||req.body.url,preview:preview.slice(0,12000)});
+  }catch(e){console.error(e);res.status(500).json({ok:false,error:'drive_read_failed'});}
 });
 app.post('/api/sheets/read',requireConnection,async(req,res)=>{
-  try{const id=googleId(req.body?.url);if(!id)return res.status(400).json({ok:false,error:'invalid_sheet_url'});const sheets=google.sheets({version:'v4',auth:req.googleAuth});const meta=await sheets.spreadsheets.get({spreadsheetId:id,fields:'properties.title,sheets.properties.title'});const first=meta.data.sheets?.[0]?.properties?.title||'Sheet1';const range=req.body?.range||`'${first.replace(/'/g,"''")}'!A1:Z50`;const r=await sheets.spreadsheets.values.get({spreadsheetId:id,range});const preview=(r.data.values||[]).map(row=>row.join('\t')).join('\n').slice(0,12000);res.json({ok:true,type:'Sheets',name:meta.data.properties?.title||'Google Sheet',url:req.body.url,preview,range});}catch(e){console.error(e);res.status(500).json({ok:false,error:'sheets_read_failed'});}
+  try{
+    const id=googleId(req.body?.url);
+    if(!id)return res.status(400).json({ok:false,error:'invalid_sheet_url'});
+    const sheets=google.sheets({version:'v4',auth:req.googleAuth});
+    const meta=await sheets.spreadsheets.get({spreadsheetId:id,fields:'properties.title,sheets.properties.title'});
+    const first=meta.data.sheets?.[0]?.properties?.title||'Sheet1';
+    const range=req.body?.range||`'${first.replace(/'/g,"''")}'!A1:Z50`;
+    const r=await sheets.spreadsheets.values.get({spreadsheetId:id,range});
+    const preview=(r.data.values||[]).map(row=>row.join('\t')).join('\n').slice(0,12000);
+    res.json({ok:true,type:'Sheets',name:meta.data.properties?.title||'Google Sheet',url:req.body.url,preview,range});
+  }catch(e){console.error(e);res.status(500).json({ok:false,error:'sheets_read_failed'});}
+});
+
+// Fallback: any other GET (e.g. a stray refresh, a trailing slash, a Render
+// health probe on an unexpected path) still gets the app shell instead of a
+// bare 404. Never swallow the real API/auth/health routes above this line.
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api/') || req.path.startsWith('/auth/') || req.path === '/health') {
+    return res.status(404).json({ ok:false, error:'not_found' });
+  }
+  res.sendFile(INDEX_HTML);
 });
 
 app.listen(PORT,()=>console.log(`Zahra HQ Google bridge listening on ${PORT}`));
