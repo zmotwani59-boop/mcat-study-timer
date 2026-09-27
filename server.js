@@ -7,6 +7,47 @@ const PORT = process.env.PORT || 10000;
 const BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const SESSION_SECRET = process.env.ZHQ_SESSION_SECRET || '';
+
+function sessionKey(){
+  if(!SESSION_SECRET) return null;
+  return crypto.createHash('sha256').update(SESSION_SECRET).digest();
+}
+function seal(payload){
+  const key=sessionKey(); if(!key) throw new Error('session_secret_missing');
+  const iv=crypto.randomBytes(12);
+  const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
+  const body=Buffer.concat([cipher.update(JSON.stringify(payload),'utf8'),cipher.final()]);
+  const tag=cipher.getAuthTag();
+  return ['v1',iv.toString('base64url'),tag.toString('base64url'),body.toString('base64url')].join('.');
+}
+function unseal(token){
+  try{
+    const [v,ivB64,tagB64,bodyB64]=String(token||'').split('.');
+    if(v!=='v1') return null;
+    const key=sessionKey(); if(!key) return null;
+    const decipher=crypto.createDecipheriv('aes-256-gcm',key,Buffer.from(ivB64,'base64url'));
+    decipher.setAuthTag(Buffer.from(tagB64,'base64url'));
+    const plain=Buffer.concat([decipher.update(Buffer.from(bodyB64,'base64url')),decipher.final()]).toString('utf8');
+    return JSON.parse(plain);
+  }catch(_e){ return null; }
+}
+function makeOAuthState(){
+  const ts=Date.now().toString();
+  const nonce=crypto.randomBytes(16).toString('hex');
+  const payload=`${ts}.${nonce}`;
+  const sig=crypto.createHmac('sha256',SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+function validOAuthState(state){
+  if(!SESSION_SECRET) return false;
+  const parts=String(state||'').split('.'); if(parts.length!==3) return false;
+  const [ts,nonce,sig]=parts;
+  const age=Date.now()-Number(ts); if(!Number.isFinite(age)||age<0||age>10*60*1000) return false;
+  const expected=crypto.createHmac('sha256',SESSION_SECRET).update(`${ts}.${nonce}`).digest();
+  const actual=Buffer.from(sig,'base64url');
+  return actual.length===expected.length && crypto.timingSafeEqual(actual,expected);
+}
 
 app.use(express.json({ limit: '5mb' }));
 app.use((req,res,next)=>{
@@ -17,14 +58,11 @@ app.use((req,res,next)=>{
   next();
 });
 
-const connections = new Map();
-const oauthStates = new Map();
-
 function makeOAuth(){
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, `${BASE_URL}/auth/google/callback`);
 }
 function authForCode(code){
-  const tokens=connections.get(code);
+  const tokens=unseal(code);
   if(!tokens) return null;
   const c=makeOAuth(); c.setCredentials(tokens); return c;
 }
@@ -43,24 +81,21 @@ const SCOPES=[
   'https://www.googleapis.com/auth/spreadsheets.readonly'
 ];
 
-app.get('/health',(_req,res)=>res.json({ok:true,service:'zahra-hq-google-bridge',googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET)}));
+app.get('/health',(_req,res)=>res.json({ok:true,service:'zahra-hq-google-bridge',googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET&&SESSION_SECRET)}));
 
 app.get('/auth/google',(req,res)=>{
-  if(!CLIENT_ID||!CLIENT_SECRET) return res.status(503).send('Google OAuth is not configured yet.');
-  const state=crypto.randomBytes(20).toString('hex');
-  oauthStates.set(state,{createdAt:Date.now()});
+  if(!CLIENT_ID||!CLIENT_SECRET||!SESSION_SECRET) return res.status(503).send('Google OAuth is not configured yet.');
+  const state=makeOAuthState();
   const url=makeOAuth().generateAuthUrl({access_type:'offline',prompt:'consent',scope:SCOPES,state});
   res.redirect(url);
 });
 
 app.get('/auth/google/callback',async(req,res)=>{
   try{
-    const st=oauthStates.get(req.query.state); oauthStates.delete(req.query.state);
-    if(!st || Date.now()-st.createdAt>10*60*1000) throw new Error('invalid_oauth_state');
+    if(!validOAuthState(req.query.state)) throw new Error('invalid_oauth_state');
     const client=makeOAuth();
     const {tokens}=await client.getToken(req.query.code);
-    const code=crypto.randomBytes(24).toString('hex');
-    connections.set(code,tokens);
+    const code=seal(tokens);
     res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Zahra HQ connected</title><body style="font:16px system-ui;padding:32px">Google connected to Zahra HQ. This window can close.<script>try{window.opener&&window.opener.postMessage({type:'zhq-google-connected',code:${JSON.stringify(code)}},'*')}catch(e){} setTimeout(()=>window.close(),700);</script></body>`);
   }catch(e){
     console.error(e);
@@ -70,14 +105,10 @@ app.get('/auth/google/callback',async(req,res)=>{
 
 app.get('/api/status',(req,res)=>{
   const code=req.get('X-ZHQ-Connection')||'';
-  res.json({ok:true,connected:!!authForCode(code),googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET)});
+  res.json({ok:true,connected:!!authForCode(code),googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET&&SESSION_SECRET)});
 });
 
-app.post('/auth/logout',(req,res)=>{
-  const code=req.get('X-ZHQ-Connection')||'';
-  if(code) connections.delete(code);
-  res.json({ok:true});
-});
+app.post('/auth/logout',(_req,res)=>{ res.json({ok:true}); });
 
 app.get('/api/calendar',requireConnection,async(req,res)=>{
   try{
