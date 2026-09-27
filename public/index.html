@@ -998,3 +998,1003 @@ function applyRecoverySnapshot(){
     if(recoveryTaskExists(item)) return;
     const p=projectOf(item.projectId||defaults.projectId||'');
     state.tasks.push(task(item.title,{
+      category:item.category||p?.category||defaults.category||'school',
+      area:item.area||p?.area||defaults.area||'school',
+      projectId:item.projectId||defaults.projectId||'',
+      due:item.due||'',
+      importance:item.importance||defaults.importance||3,
+      effort:item.effort||defaults.effort||'Medium',
+      notes:[item.details,item.notes,item.courseCode?`${item.courseCode} · ${item.courseName||''}`:'',item.source?`Recovered from ${item.source}`:'Recovered from prior HQ data'].filter(Boolean).join('\n'),
+      lastTouchedAt:new Date().toISOString()
+    }));
+    addedTasks++;
+  };
+  (snap.assignments||[]).filter(a=>!a.due||a.due>=localISO()).forEach(a=>addRecoveredTask({...a,title:recoveryAssignmentTitle(a)},{category:'school',area:'school'}));
+  (snap.gumapsActions||[]).filter(a=>!a.due||a.due>=localISO()).forEach(a=>addRecoveredTask(a,{category:'gumaps',area:'gumaps'}));
+  state.recoveryAppliedAt=new Date().toISOString();
+  save(); render();
+  toast(`Recovered ${addedTasks} tasks · ${addedProjects} projects`);
+}
+function recoverySummary(){
+  const s=state.recoveryArchive||RECOVERY_SNAPSHOT;
+  return `${(s.courses||[]).length} courses · ${(s.assignments||[]).length} assignments · ${(s.friendCalendars||[]).length} friend calendars · ${(s.projects||[]).length} projects`;
+}
+
+function pendingSuggestions(projectId=''){ return (state.suggestions||[]).filter(s=>s.status==='pending' && (!projectId||s.projectId===projectId)); }
+const PROJECT_SUGGESTION_LIMIT=3; // show a few at a time on a project page instead of dumping every pending suggestion at once
+const expandedSuggestionProjects=new Set(); // UI-only, not persisted — resets each load, which is fine for a "show more" toggle
+function dismissWorkflowSuggestion(id){ const s=state.suggestions.find(x=>x.id===id); if(!s)return; s.status='dismissed'; s.resolvedAt=new Date().toISOString(); s.dismissCount=(s.dismissCount||0)+1; save(); render(); }
+let editingSuggestionId='';
+function acceptWorkflowSuggestion(id,edit=false){
+  const s=state.suggestions.find(x=>x.id===id); if(!s) return;
+  if(edit){ editingSuggestionId=id; const p=projectOf(s.projectId); openTaskModal('',{title:s.title,projectId:s.projectId,category:p?.category||'personal',area:p?.area||'personal',notes:`Suggested because ${s.reason||'of project context'}`}); return; }
+  const p=projectOf(s.projectId); const t=addTask({title:s.title,projectId:s.projectId,category:p?.category||'personal',area:p?.area||'personal',importance:3,effort:'Low',suggestedBy:s.id});
+  s.status='accepted'; s.resolvedAt=new Date().toISOString(); s.createdTaskId=t.id; addProjectActivity(s.projectId,`Accepted next action: ${s.title}`,'noted'); save(); render(); toast('Added to Tasks');
+}
+function logHQUpdate(){
+  const sel=document.getElementById('hq-update-project'), inp=document.getElementById('hq-update-input'); if(!sel||!inp) return;
+  const projectId=sel.value; const text=inp.value.trim(); if(!projectId||!text){ toast('Choose a project and add an update'); return; }
+  inp.value=''; const low=text.toLowerCase();
+  let type=/\b(?:decid(?:ed|e)|agreed)\b/i.test(text)?'decided':(/\b(done|finished|finalized|completed|confirmed|ready)\b/i.test(text)?'completed':'noted');
+  const p=projectOf(projectId);
+  if(/(still|hasn.t|haven.t|waiting|no word|no reply)/i.test(text) && !/(confirmed|replied|done|finished)/i.test(text)){
+    const who=(text.match(/(?:waiting on|from)\s+([A-Za-z][A-Za-z ]{1,40})/i)||[])[1]||'';
+    p.waiting=p.waiting||[]; p.waiting.push({id:uid('w'),what:text,who:who.trim(),sinceDate:localISO(),projectId}); p.status='waiting';
+  }
+  const effects=processProjectEvent(projectId,text,type); feedbackFromEffects(projectId,effects,[]); save(); state.activeProjectId=projectId; currentRoute='projects'; renderNav(); render();
+}
+function renderSuggestionCard(s){
+  const direct=s.sourceType==='rule';
+  return `<div class="suggestion-card"><div class="suggestion-title">${direct?'':'Consider: '}${escapeHtml(s.title)}</div><div class="suggestion-reason">${direct?'Because ':'Why: '}${escapeHtml((s.reason||'').replace(/^because\s+/i,''))}</div><div class="suggestion-actions"><button class="btn btn-sm btn-primary" onclick="acceptWorkflowSuggestion('${s.id}')">Accept</button><button class="btn btn-sm" onclick="acceptWorkflowSuggestion('${s.id}',true)">Edit</button><button class="btn btn-sm" onclick="dismissWorkflowSuggestion('${s.id}')">Dismiss</button></div></div>`;
+}
+
+/* =========================================================================
+   Natural-language command parsing (⌘K)
+   ========================================================================= */
+function parseNextWeekday(word){
+  const days=['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  word=word.toLowerCase();
+  if(word==='today') return localISO();
+  if(word==='tomorrow') return addDays(localISO(),1);
+  const idx=days.indexOf(word); if(idx<0) return null;
+  const cur=new Date().getDay(); let add=(idx-cur+7)%7; if(add===0) add=7;
+  return addDays(localISO(), add);
+}
+function parseTime(str){
+  const m=(str||'').match(/(\d{1,2})(:(\d{2}))?\s*(am|pm)?/i);
+  if(!m) return '09:00';
+  let h=parseInt(m[1],10); const min=m[3]?m[3]:'00'; const ap=m[4]?m[4].toLowerCase():null;
+  if(ap==='pm'&&h<12) h+=12; if(ap==='am'&&h===12) h=0;
+  if(!ap&&h<8) h+=12;
+  return String(h).padStart(2,'0')+':'+min;
+}
+function tryParseCommand(q){
+  const raw=q.trim(); let m;
+  if((m=raw.match(/^done\s+(.+)$/i))) return {type:'done', title:m[1]};
+  if((m=raw.match(/^schedule\s+(.+?)\s+(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s*(?:at\s*)?(.*)$/i))) return {type:'schedule', title:m[1], day:m[2], time:m[3]};
+  if((m=raw.match(/^due\s+(.+?)\s+(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i))) return {type:'due', title:m[1], day:m[2]};
+  if((m=raw.match(/^wait\s+(.+?)\s+on\s+(.+)$/i))) return {type:'wait', title:m[1], person:m[2]};
+  if((m=raw.match(/^snooze\s+(.+?)\s+until\s+(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i))) return {type:'snooze', title:m[1], day:m[2]};
+  return null;
+}
+function executeCommand(cmd){
+  const t = findTaskByTitle(cmd.title);
+  if(!t){ toast(`No task matching "${cmd.title}"`); return; }
+  if(cmd.type==='done'){ toggleDone(t.id); return; }
+  if(cmd.type==='schedule'){ const d=parseNextWeekday(cmd.day); const time=parseTime(cmd.time||'9am'); updateTask(t.id,{scheduled:true, date:d, start:time}); toast(`Scheduled "${t.title}" for ${fmtShort(d)} ${time}`); }
+  if(cmd.type==='due'){ const d=parseNextWeekday(cmd.day); updateTask(t.id,{due:d}); toast(`Due date set: ${t.title} → ${fmtShort(d)}`); }
+  if(cmd.type==='wait'){ updateTask(t.id,{waitingOn:{id:uid('w'),what:t.title,who:cmd.person,sinceDate:localISO(),projectId:t.projectId||''}}); toast(`Waiting on ${cmd.person}: ${t.title}`); }
+  if(cmd.type==='snooze'){ const d=parseNextWeekday(cmd.day); updateTask(t.id,{snoozedUntil:d}); toast(`Snoozed until ${fmtShort(d)}: ${t.title}`); }
+  render();
+}
+
+/* =========================================================================
+   Command Palette UI
+   ========================================================================= */
+function openPalette(){ document.getElementById('palette-overlay').classList.add('open'); const input=document.getElementById('palette-input'); input.value=''; input.focus(); renderPaletteResults(''); }
+function closePalette(){ document.getElementById('palette-overlay').classList.remove('open'); }
+function renderPaletteResults(q){
+  const box=document.getElementById('palette-results');
+  const cmd=tryParseCommand(q);
+  if(cmd){ box.innerHTML=`<div class="palette-item sel">${icon('flag')}<span>Run: <b>${escapeHtml(q)}</b></span><span class="palette-hint">Enter</span></div>`; box.dataset.cmd=JSON.stringify(cmd); box.dataset.items=''; return; }
+  box.dataset.cmd='';
+  const items=[];
+  if(q.trim()===''){
+    ROUTES.forEach(r=>items.push({type:'nav',id:r.id,label:'Go to '+r.label,icon:r.icon}));
+    items.push({type:'nav', id:'settings', label:'Go to Settings', icon:'settings'});
+    items.push({type:'action', label:'Calendar background', icon:'calendar', run:()=>{navigate('calendar'); setTimeout(openBgPicker,50);}});
+    items.push({type:'action', label:'Export backup', icon:'download', run:exportBackup});
+  } else {
+    const ql=q.toLowerCase();
+    ROUTES.filter(r=>r.label.toLowerCase().includes(ql)).forEach(r=>items.push({type:'nav',id:r.id,label:'Go to '+r.label,icon:r.icon}));
+    const taskMatches = state.tasks.filter(t=>!t.done && [t.title,t.notes,...(t.checklist||[]).map(c=>c.text)].join(' ').toLowerCase().includes(ql)).slice(0,6);
+    taskMatches.forEach(t=>items.push({type:'task', id:t.id, label:t.title, icon:'tasks', sub:'Task'}));
+    state.notes.filter(n=>[n.title,n.body].join(' ').toLowerCase().includes(ql)).slice(0,4).forEach(n=>items.push({type:'note', id:n.id, label:n.title||'Untitled note', icon:'notes', sub:'Note'}));
+    state.areas.filter(a=>[a.name,a.note].join(' ').toLowerCase().includes(ql)).slice(0,4).forEach(a=>items.push({type:'area', id:a.id, label:a.name, icon:'areas', sub:'Area'}));
+    (state.projects||[]).filter(p=>[p.name,p.goal,computedProjectState(p)].join(' ').toLowerCase().includes(ql)).slice(0,5).forEach(p=>items.push({type:'project',id:p.id,label:p.name,icon:'areas',sub:'Project'}));
+    state.categories.filter(c=>c.name.toLowerCase().includes(ql)).slice(0,4).forEach(c=>items.push({type:'category', id:c.id, label:c.name, icon:'tasks', sub:'Category'}));
+    items.push({type:'newtask', label:`Capture “${q}”`, icon:'plus', sub:'Smart add'});
+  }
+  if(items.length===0){ box.innerHTML=`<div class="palette-empty">No matches. Try <b>done aim 2</b> or <b>schedule radio show tomorrow 2pm</b>.</div>`; return; }
+  box.innerHTML=items.map((it,i)=>`<div class="palette-item" data-idx="${i}" onclick="paletteAction(${i})">${icon(it.icon)}<span>${escapeHtml(it.label)}</span>${it.sub?`<span class="palette-hint">${it.sub}</span>`:''}</div>`).join('');
+  box.dataset.items=JSON.stringify(items.map(it=>({...it, run:undefined})));
+  window.__paletteRuns = items.map(it=>it.run);
+}
+function paletteAction(i){
+  const box=document.getElementById('palette-results');
+  const items=JSON.parse(box.dataset.items||'[]'); const it=items[i]; if(!it) return;
+  if(it.type==='nav'){ navigate(it.id); closePalette(); }
+  if(it.type==='task'){ closePalette(); navigate('tasks'); setTimeout(()=>openTaskModal(it.id),50); }
+  if(it.type==='newtask'){ const q=document.getElementById('palette-input').value; closePalette(); smartCaptureText(q); }
+  if(it.type==='note'){ notesActiveId=it.id; closePalette(); navigate('notes'); }
+  if(it.type==='area'){ closePalette(); openArea(it.id); }
+  if(it.type==='project'){ closePalette(); openProject(it.id); }
+  if(it.type==='category'){ state.taskAreaFilter=''; state.boardCatFilter=[it.id]; state.taskTab='current'; save(); closePalette(); navigate('tasks'); }
+  if(it.type==='action'){ closePalette(); if(window.__paletteRuns && window.__paletteRuns[i]) window.__paletteRuns[i](); }
+}
+document.getElementById('palette-input').addEventListener('input', e=>renderPaletteResults(e.target.value));
+document.getElementById('palette-input').addEventListener('keydown', e=>{
+  if(e.key==='Escape') closePalette();
+  if(e.key==='Enter'){
+    const box=document.getElementById('palette-results');
+    if(box.dataset.cmd){ executeCommand(JSON.parse(box.dataset.cmd)); closePalette(); return; }
+    const items=JSON.parse(box.dataset.items||'[]'); if(items.length) paletteAction(0);
+  }
+});
+document.addEventListener('keydown', e=>{
+  if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); openPalette(); }
+  if(e.key==='Escape') closeTaskModal();
+});
+
+/* =========================================================================
+   Task modal
+   ========================================================================= */
+function openTaskModal(id,defaults={}){
+  const t = id ? state.tasks.find(x=>x.id===id) : null;
+  const isNew = !t;
+  const d = t || task('',defaults);
+  modalChecklist = (d.checklist||[]).map(c=>({...c}));
+  document.getElementById('task-modal').innerHTML = `
+    <h3>${isNew?'New task':'Edit task'}</h3>
+    <div class="field-row"><label>Title</label><input id="tm-title" value="${escapeHtml(d.title)}" placeholder="What needs doing?"></div>
+    <div class="field-row"><label>Project</label><select id="tm-project"><option value="">No project</option>${(state.projects||[]).map(p=>`<option value="${p.id}" ${p.id===d.projectId?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>
+    <div class="two-col">
+      <div class="field-row"><label>Category</label><select id="tm-cat">${state.categories.map(c=>`<option value="${c.id}" ${c.id===d.category?'selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select></div>
+      <div class="field-row"><label>Area</label><select id="tm-area">${state.areas.map(a=>`<option value="${a.id}" ${a.id===(d.area||d.category)?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div>
+    </div>
+    <div class="two-col">
+      <div class="field-row"><label>Effort</label><select id="tm-effort">${['Low','Medium','High'].map(e=>`<option ${e===d.effort?'selected':''}>${e}</option>`).join('')}</select></div>
+      <div class="field-row"><label>Importance (1–5)</label><select id="tm-importance">${[1,2,3,4,5].map(n=>`<option ${n===d.importance?'selected':''}>${n}</option>`).join('')}</select></div>
+    </div>
+    <div class="field-row"><label>Due date</label><input id="tm-due" type="date" value="${d.due||''}"></div>
+    <div class="two-col">
+      <div class="field-row"><label>Waiting on who</label><input id="tm-waiting-who" value="${escapeHtml(d.waitingOn?.who||'')}" placeholder="Person / group"></div>
+      <div class="field-row"><label>Waiting for what</label><input id="tm-waiting-what" value="${escapeHtml(d.waitingOn?.what||'')}" placeholder="Reply, date, approval…"></div>
+    </div>
+    <div class="field-row"><label>Snoozed until</label><input id="tm-snooze" type="date" value="${d.snoozedUntil||''}"></div>
+    <div class="field-row"><label>Repeat</label><select id="tm-repeat">${[['none','Does not repeat'],['daily','Daily'],['weekly','Weekly'],['monthly','Monthly']].map(([v,label])=>`<option value="${v}" ${v===(d.repeat||'none')?'selected':''}>${label}</option>`).join('')}</select></div>
+    <div class="field-row"><label>Blocked by</label><select id="tm-blocked"><option value="">Nothing</option>${state.tasks.filter(x=>x.id!==d.id&&!x.done).map(x=>`<option value="${x.id}" ${(d.blockedBy||[]).includes(x.id)?'selected':''}>${escapeHtml(x.title)}</option>`).join('')}</select></div>
+    <div class="checkbox-row" style="margin-bottom:10px;"><input type="checkbox" id="tm-scheduled" ${d.scheduled?'checked':''}> <label style="margin:0; text-transform:none; font-weight:500; font-size:13px; color:var(--ink);">Scheduled on Calendar (give it a time)</label></div>
+    <div class="three-col">
+      <div class="field-row"><label>Date</label><input id="tm-date" type="date" value="${d.date||''}"></div>
+      <div class="field-row"><label>Start</label><input id="tm-start" type="time" value="${d.start||''}"></div>
+      <div class="field-row"><label>End</label><input id="tm-end" type="time" value="${d.end||''}"></div>
+    </div>
+    <div class="field-row"><label>Location <span class="subtle" style="text-transform:none;letter-spacing:0;font-weight:400;">optional · enables leave-by on Home</span></label><input id="tm-location" value="${escapeHtml(d.location||'')}" placeholder="e.g. Yates, HFSC, Squash on Fire"></div>
+    <div class="checkbox-row" style="margin-bottom:12px;"><input type="checkbox" id="tm-hidden" ${d.hiddenUntilReset?'checked':''}> <label style="margin:0; text-transform:none; font-weight:500; font-size:13px; color:var(--ink);">Park — only surface in Weekly Reset</label></div>
+    <div class="field-row" id="checklist-editor-wrap">${renderChecklistEditor()}</div>
+    <div class="field-row"><label>Notes</label><textarea id="tm-notes">${escapeHtml(d.notes||'')}</textarea></div>
+    <div class="modal-actions">
+      <div>${!isNew?`<button class="btn btn-sm btn-danger" onclick="deleteTaskWithUndo('${d.id}'); closeTaskModal();">Delete</button>`:'<span></span>'}</div>
+      <div style="display:flex; gap:8px;"><button class="btn btn-sm" onclick="closeTaskModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="saveTaskModal('${isNew?'':d.id}')">Save</button></div>
+    </div>`;
+  document.getElementById('task-modal-overlay').classList.add('open');
+  setTimeout(()=>document.getElementById('tm-title').focus(),30);
+}
+function closeTaskModal(){ document.getElementById('task-modal-overlay').classList.remove('open'); editingSuggestionId=''; }
+/* ---- Checklist editor (within task modal) ---- */
+let modalChecklist = [];
+function renderChecklistEditor(){
+  return `<label>Checklist${modalChecklist.length?` <span class="subtle">(${modalChecklist.filter(c=>c.done).length}/${modalChecklist.length})</span>`:''}</label>
+    <div id="checklist-list">${modalChecklist.map((c,i)=>`
+      <div class="checklist-item-row">
+        <input type="checkbox" ${c.done?'checked':''} onchange="toggleChecklistItem(${i})">
+        <input type="text" value="${escapeHtml(c.text)}" oninput="updateChecklistText(${i},this.value)" placeholder="Item">
+        <button type="button" class="icon-btn" onclick="removeChecklistItem(${i})">${icon('x',13)}</button>
+      </div>`).join('')}</div>
+    <div class="checklist-add-row"><input id="checklist-new-input" placeholder="Add item…" onkeydown="if(event.key==='Enter'){event.preventDefault(); addChecklistItem();}"><button type="button" class="btn btn-sm" onclick="addChecklistItem()">${icon('plus',12)}</button></div>`;
+}
+function refreshChecklistEditor(){ document.getElementById('checklist-editor-wrap').innerHTML = renderChecklistEditor(); }
+function addChecklistItem(){
+  const inp=document.getElementById('checklist-new-input'); const v=inp.value.trim(); if(!v) return;
+  modalChecklist.push({id:uid('ci'), text:v, done:false});
+  refreshChecklistEditor();
+  setTimeout(()=>{ const el=document.getElementById('checklist-new-input'); if(el) el.focus(); },10);
+}
+function removeChecklistItem(i){ modalChecklist.splice(i,1); refreshChecklistEditor(); }
+function toggleChecklistItem(i){ modalChecklist[i].done=!modalChecklist[i].done; refreshChecklistEditor(); }
+function updateChecklistText(i,v){ modalChecklist[i].text=v; }
+function saveTaskModal(id){
+  const cat = document.getElementById('tm-cat').value;
+  const patch = {
+    title: document.getElementById('tm-title').value.trim() || 'Untitled task',
+    projectId: document.getElementById('tm-project').value || '',
+    category: cat, area: document.getElementById('tm-area').value || cat,
+    effort: document.getElementById('tm-effort').value,
+    due: document.getElementById('tm-due').value || '',
+    importance: parseInt(document.getElementById('tm-importance').value,10),
+    waitingOn: (document.getElementById('tm-waiting-who').value.trim()||document.getElementById('tm-waiting-what').value.trim()) ? {id:(id&&state.tasks.find(x=>x.id===id)?.waitingOn?.id)||uid('w'), who:document.getElementById('tm-waiting-who').value.trim(), what:document.getElementById('tm-waiting-what').value.trim(), sinceDate:(id&&state.tasks.find(x=>x.id===id)?.waitingOn?.sinceDate)||localISO(), projectId:document.getElementById('tm-project').value||''} : null,
+    snoozedUntil: document.getElementById('tm-snooze').value || '',
+    repeat: document.getElementById('tm-repeat').value || 'none',
+    blockedBy: document.getElementById('tm-blocked').value ? [document.getElementById('tm-blocked').value] : [],
+    scheduled: document.getElementById('tm-scheduled').checked,
+    date: document.getElementById('tm-date').value || '',
+    start: document.getElementById('tm-start').value || '',
+    end: document.getElementById('tm-end').value || '',
+    location: document.getElementById('tm-location').value.trim(),
+    hiddenUntilReset: document.getElementById('tm-hidden').checked,
+    notes: document.getElementById('tm-notes').value,
+    checklist: modalChecklist.filter(c=>c.text.trim()).map(c=>({...c, text:c.text.trim()})),
+  };
+  if(id){ updateTask(id, patch); toast('Task updated'); } else { const nt=addTask({...patch,suggestedBy:editingSuggestionId||''}); if(editingSuggestionId){ const sg=state.suggestions.find(x=>x.id===editingSuggestionId); if(sg){sg.status='edited';sg.resolvedAt=new Date().toISOString();sg.createdTaskId=nt.id;} editingSuggestionId=''; save(); } toast('Task added'); }
+  closeTaskModal(); render();
+}
+
+/* =========================================================================
+   Shared task row renderer
+   ========================================================================= */
+function importanceDots(n){ return `<span class="importance-flag">${Array.from({length:n||0}).map(()=>icon('star',9)).join('')}</span>`; }
+function renderTaskRow(t, opts={}){
+  const c = catOf(t.category);
+  let meta = '';
+  if(t.due) meta += `<span class="meta-tag ${dueClass(t)}">${icon('calendar',11)} ${escapeHtml(dueText(t))}</span>`;
+  if(t.waitingOn) meta += `<span class="meta-tag waiting">${icon('clock',11)} waiting · ${escapeHtml(waitingLabel(t.waitingOn))}</span>`;
+  if(isSnoozed(t)) meta += `<span class="meta-tag snoozed">${icon('clock',11)} snoozed → ${fmtShort(t.snoozedUntil)}</span>`;
+  if(t.scheduled && t.date) meta += `<span class="meta-tag">${icon('calendar',11)} ${fmtShort(t.date)}${t.start?', '+t.start:''}</span>`;
+  if(isAttention(t)) meta += `<span class="meta-tag attention">needs attention</span>`;
+  if(isBlocked(t)) meta += `<span class="meta-tag blocked-tag">blocked</span>`;
+  if(t.projectId && projectOf(t.projectId)) meta += `<span class="project-tag">${escapeHtml(projectOf(t.projectId).name)}</span>`;
+  if(t.repeat && t.repeat!=='none') meta += `<span class="meta-tag">${icon('repeat',10)} ${t.repeat}</span>`;
+  meta += checklistBadge(t);
+  meta += `<span class="meta-tag">${t.effort||'Medium'}</span>`;
+  return `
+  <div class="task-row" draggable="true" data-id="${t.id}" ondragstart="onDragStart(event,'${t.id}')" ondragover="onDragOver(event)" ondrop="onDrop(event,'${t.id}')">
+    <span class="drag-handle">${icon('drag',13)}</span>
+    <div class="task-check ${t.done?'checked':''}" onclick="toggleDone('${t.id}')">${icon('check',11)}</div>
+    <div class="task-main" onclick="openTaskModal('${t.id}')">
+      <div class="task-title-row">
+        ${!opts.hideCat?`<span class="category-color-swatch" style="background:${c.color}"></span>`:''}
+        ${t.importance>=4?importanceDots(t.importance):''}
+        <span class="task-title ${t.done?'done':''}">${escapeHtml(t.title)}</span>
+      </div>
+      <div class="task-meta-row">${meta}</div>
+    </div>
+  </div>`;
+}
+let dragId=null;
+function onDragStart(e,id){ dragId=id; e.target.classList.add('dragging'); }
+function onDragOver(e){ e.preventDefault(); }
+function onDrop(e,targetId){
+  e.preventDefault(); document.querySelectorAll('.task-row').forEach(r=>r.classList.remove('dragging'));
+  if(!dragId||dragId===targetId) return;
+  const a=state.tasks.find(t=>t.id===dragId), b=state.tasks.find(t=>t.id===targetId);
+  if(!a||!b) return; const tmp=a.order; a.order=b.order; b.order=tmp; save(); render();
+}
+
+/* Product invariant: Home is a read/glance surface. No inline rescheduling and no OS/push calendar reminders. */
+/* =========================================================================
+   PAGE: Home
+   ========================================================================= */
+function minutesOfTime(v){
+  if(!v || !/^\d{1,2}:\d{2}$/.test(v)) return null;
+  const [h,m]=v.split(':').map(Number); return h*60+m;
+}
+function travelBufferFor(t){ return Math.max(0, Number(TRAVEL_BUFFERS[t.category]||0)); }
+function leaveByFor(t){ const start=minutesOfTime(t.start); const buffer=travelBufferFor(t); if(start===null||!buffer||!t.location) return ''; let m=start-buffer; if(m<0)m+=1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); }
+function inferProjectForExternal(title){
+  const q=String(title||'');
+  let best=null,bestScore=0;
+  (state.projects||[]).forEach(p=>{ const score=Math.max(titleSimilarity(q,p.name),...projectTasks(p.id).map(t=>titleSimilarity(q,t.title))); if(score>bestScore){bestScore=score;best=p;} });
+  return bestScore>=0.6 ? best.id : '';
+}
+function normalizeExternalCalendarEvent(e){
+  const category=e.category||inferCategory(e.title||'');
+  return {id:e.id||uid('gcal'),source:'gcal',title:e.title||'Untitled event',date:e.date||localISO(),start:e.start||'',end:e.end||'',allDay:!!e.allDay,location:e.location||'',externalUrl:e.externalUrl||'',category,projectId:e.projectId||inferProjectForExternal(e.title||''),updatedAt:e.updatedAt||new Date().toISOString()};
+}
+function calendarItemsForDate(iso){
+  const local=state.tasks.filter(t=>!t.done&&t.scheduled&&t.date===iso).map(t=>({source:'hq',id:t.id,title:t.title,date:t.date,start:t.start||'',end:t.end||'',allDay:!t.start,location:t.location||'',category:t.category||'personal',projectId:t.projectId||'',repeat:t.repeat||'none',waitingOn:t.waitingOn||null,raw:t}));
+  const external=(state.externalCalendarEvents||[]).filter(e=>e.date===iso).map(e=>normalizeExternalCalendarEvent(e));
+  return [...local,...external];
+}
+function openCalendarItem(item){
+  if(item.source==='gcal'){ if(item.externalUrl) window.open(item.externalUrl,'_blank','noopener'); else toast('This Google Calendar event is read-only in Zahra HQ'); return; }
+  openTaskModal(item.id);
+}
+function rescheduleTomorrow(id){
+  const t=state.tasks.find(x=>x.id===id); if(!t) return;
+  const fromDate=t.scheduled?t.date:t.due;
+  const toDate=addDays(fromDate||localISO(),1);
+  t.rescheduleHistory=Array.isArray(t.rescheduleHistory)?t.rescheduleHistory:[];
+  t.rescheduleHistory.push({fromDate:fromDate||localISO(),toDate,at:new Date().toISOString()});
+  if(t.scheduled) t.date=toDate; else t.due=toDate;
+  t.lastTouchedAt=new Date().toISOString(); save(); render(); toast('Moved to tomorrow','Undo',()=>{ if(t.scheduled)t.date=fromDate;else t.due=fromDate; t.rescheduleHistory.pop();save();render(); });
+}
+
+function todayRailEntries(){
+  const today=localISO();
+  const now=new Date();
+  const nowMin=now.getHours()*60+now.getMinutes();
+  const entries=calendarItemsForDate(today).map(item=>{
+    const start=minutesOfTime(item.start);
+    let end=minutesOfTime(item.end);
+    if(start!==null && end===null) end=start+60;
+    if(start!==null && end!==null && end<=start) end+=1440; // belongs to start day
+    return {kind:(item.allDay||start===null)?'allDay':'timed',item,start,end,past:start!==null&&end!==null&&nowMin>=end,conflict:false};
+  });
+  const timedOnly=entries.filter(e=>e.kind==='timed');
+  for(let i=0;i<timedOnly.length;i++) for(let j=i+1;j<timedOnly.length;j++){
+    const a=timedOnly[i],b=timedOnly[j];
+    if(Math.max(a.start,b.start)<Math.min(a.end,b.end)){a.conflict=b.conflict=true;}
+  }
+  const dueOnly=state.tasks.filter(t=>!t.done&&!isSnoozed(t)&&!t.scheduled&&t.due===today).map(t=>({kind:'due',item:{source:'hq',id:t.id,title:t.title,category:t.category||'personal',projectId:t.projectId||'',location:t.location||'',repeat:t.repeat||'none',waitingOn:t.waitingOn||null,raw:t},start:null,end:null,past:false,conflict:false}));
+  return [...entries.filter(e=>!e.past).sort((a,b)=>(a.start??9999)-(b.start??9999)),...dueOnly,...entries.filter(e=>e.past).sort((a,b)=>(a.start??9999)-(b.start??9999))];
+}
+function renderTodayRail(){
+  const entries=todayRailEntries();
+  if(!entries.length) return `<div class="today-empty">Nothing scheduled today.</div>`;
+  const shown=entries.slice(0,HOME_RAIL_LIMIT);
+  return `<div class="today-rail">${shown.map(e=>{
+    const item=e.item,c=catOf(item.category),p=projectOf(item.projectId);
+    const raw=item.raw||{};
+    const leaveBy=e.kind==='timed'&&item.source==='hq'?leaveByFor(raw):'';
+    const time=e.kind==='timed'?`${item.start}${leaveBy?`<span class="today-rail-leave">leave ${leaveBy}</span>`:''}`:`<span class="today-tag">today</span>`;
+    const label=e.kind==='due'?'Due today':e.kind==='allDay'?'All day':'Scheduled';
+    const sourceMark=item.source==='gcal'?`<span class="gcal-mark" aria-label="Google Calendar">G</span>`:`<span class="rail-cat-dot" style="background:${c.color}"></span>`;
+    const waitingClass=item.waitingOn?'waiting-human':'';
+    return `<div class="today-rail-row ${e.past?'past':''} ${e.conflict?'conflict':''} ${waitingClass} ${item.source==='gcal'?'gcal':''}" tabindex="0" role="button" onclick='openCalendarItem(${JSON.stringify(item).replace(/'/g,"&#39;")})' onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}" aria-label="${escapeHtml(label+': '+item.title)}">
+      <div class="today-rail-time">${time}</div>
+      <div><div class="today-rail-title">${escapeHtml(item.title)}</div><div class="today-rail-meta">${sourceMark}<span>${escapeHtml(item.source==='gcal'?'Google Calendar':(p?.name||c.name))}</span>${item.location?`<span>· ${escapeHtml(item.location)}</span>`:''}${item.repeat&&item.repeat!=='none'?`<span class="today-rail-repeat" aria-label="Repeats">↻</span>`:''}${e.past?'<span>passed</span>':''}</div></div>
+      ${item.source==='hq'?`<button class="today-rail-reschedule" onclick="event.stopPropagation();rescheduleTomorrow('${item.id}')" aria-label="Move ${escapeHtml(item.title)} to tomorrow">→ tomorrow</button>`:`<span class="subtle">${e.conflict?'conflict':''}</span>`}
+    </div>`;
+  }).join('')}${entries.length>HOME_RAIL_LIMIT?`<button class="today-rail-more" onclick="openCalendarDate('${localISO()}')">+${entries.length-HOME_RAIL_LIMIT} more today</button>`:''}</div>`;
+}
+function agingWaitingCount(){
+  const cutoff=addDays(localISO(),-5);
+  let n=0;
+  (state.projects||[]).forEach(p=>(p.waiting||[]).forEach(w=>{if(w.sinceDate&&w.sinceDate<=cutoff)n++;}));
+  state.tasks.forEach(t=>{if(!t.done&&t.waitingOn&&t.waitingOn.sinceDate&&t.waitingOn.sinceDate<=cutoff&&!t.due)n++;});
+  return n;
+}
+function weekShapeText(days){
+  const isos=days.map(localISO);
+  const scheduled=isos.reduce((n,iso)=>n+calendarItemsForDate(iso).length,0);
+  const waiting=(state.projects||[]).reduce((n,p)=>n+(p.waiting||[]).length,0)+state.tasks.filter(t=>!t.done&&t.waitingOn).length;
+  return `${scheduled} scheduled ahead · ${waiting} waiting on people`;
+}
+function pageHome(){
+  const today=localISO();
+  const nextActions=sortTasks(activeTasks().filter(t=>!isSnoozed(t)&&!isBlocked(t)&&!t.waitingOn&&withinHorizon(t))).slice(0,5);
+  const changed=(state.projects||[]).flatMap(p=>(p.activity||[]).slice(-2).map(a=>({...a,projectId:p.id}))).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,3);
+  const waiting=(state.projects||[]).flatMap(p=>[...(p.waiting||[]).map(w=>({...w,projectId:p.id})),...projectTasks(p.id).filter(t=>!t.done&&t.waitingOn).map(t=>({...t.waitingOn,projectId:p.id,taskId:t.id}))]).sort((a,b)=>(a.sinceDate||'').localeCompare(b.sinceDate||'')).slice(0,3);
+  const suggestions=pendingSuggestions().slice(0,3);
+  const now=new Date();
+  return `
+  <div class="home-date">${fmtLong(today)}</div>
+  <div class="home-hero"><h1 class="home-greeting">Good ${now.getHours()<12?'morning':now.getHours()<18?'afternoon':'evening'}, Zahra.</h1></div>
+  ${renderWeekStrip()}
+  ${renderTodayRail()}
+  <div class="quick-capture">${icon('plus')}<input id="quick-capture-input" placeholder="Quick task — date only = due · add a time = scheduled" onkeydown="if(event.key==='Enter'&&this.value.trim()){handleQuickCapture(this);}"></div>
+  <div class="update-hq"><select id="hq-update-project"><option value="">Update which project?</option>${(state.projects||[]).map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}</select><input id="hq-update-input" placeholder="What happened? — ‘Anjali finished the flyer’" onkeydown="if(event.key==='Enter')logHQUpdate()"><button class="btn btn-sm" onclick="logHQUpdate()">Update HQ</button></div>
+  ${changed.length?`<div class="section-label">Changed recently</div><div class="project-brief">${changed.map(a=>`<div class="activity-row"><span class="activity-dot"></span><div class="activity-text"><b>${escapeHtml(projectOf(a.projectId)?.name||'Project')}</b> · ${escapeHtml(a.text)}</div><span class="activity-date">${fmtShort(a.date.slice(0,10))}</span></div>`).join('')}</div>`:''}
+  ${waiting.length?`<div class="section-label">Waiting on people</div>${waiting.map(w=>`<div class="waiting-card" onclick="openProject('${w.projectId}')"><div class="waiting-body"><div class="waiting-title">${escapeHtml(w.what||w.who||'Waiting')}</div><div class="waiting-meta">${escapeHtml(projectOf(w.projectId)?.name||'')} ${w.who?'· '+escapeHtml(w.who):''} · since ${fmtShort(w.sinceDate)}</div></div></div>`).join('')}`:''}
+  <div class="section-label">Next useful actions</div><div class="top-tasks">${nextActions.length?nextActions.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">No next actions need your attention right now.</div>`}</div>
+  ${suggestions.length?`<div class="section-label">Suggested</div>${suggestions.map(renderSuggestionCard).join('')}`:''}
+  <div class="section-label">A note for today</div><div class="home-note-box"><textarea id="home-note-area" placeholder="Freeform thoughts — not tracked as tasks unless you say so.">${escapeHtml(state.homeNote||'')}</textarea></div>`;
+}
+function bindHomeEvents(){
+  const ta=document.getElementById('home-note-area');
+  if(ta) ta.addEventListener('input',()=>{state.homeNote=ta.value;save();});
+  state.lastHomeVisitAt=new Date().toISOString();
+  localStorage.setItem(DB_KEY, JSON.stringify(state)); // persist without bumping state.updatedAt — just opening Home isn't a real edit, and doing so was making this device look "newest" on every visit and silently overwrite genuinely newer data synced from another device.
+}
+function renderWeekStrip(){
+  const start=new Date(); start.setHours(12,0,0,0);
+  const days=[...Array(HOME_STRIP_DAYS)].map((_,i)=>{const d=new Date(start);d.setDate(d.getDate()+i);return d;});
+  const todayIso=localISO();
+  const agedWaiting=agingWaitingCount()>0;
+  return `<div class="week-strip">${days.map((d,i)=>{
+    const iso=localISO(d);
+    const items=calendarItemsForDate(iso);
+    const weekend=[0,6].includes(d.getDay());
+    const emptyLater=i>=2&&items.length===0;
+    return `<button class="week-strip-day ${iso===todayIso?'today':''} ${weekend?'weekend':''} ${emptyLater?'empty-later':''} ${iso===todayIso&&agedWaiting?'waiting-aged':''}" onclick="openCalendarDate('${iso}')" aria-label="Open ${fmtLong(iso)} in Calendar">
+      <div class="wsd-label">${d.toLocaleDateString(undefined,{weekday:'short'})}</div>
+      <div class="wsd-num">${d.getDate()}</div>
+      <div class="wsd-dots">${items.slice(0,4).map(item=>item.source==='gcal'?`<span class="gcal-mark" aria-label="Google Calendar">G</span>`:`<span class="wsd-dot" style="background:${catOf(item.category).color}"></span>`).join('')}${items.length>4?`<span class="wsd-more">+${items.length-4}</span>`:''}</div>
+    </button>`;
+  }).join('')}</div><div class="week-shape">${weekShapeText(days)}</div>`;
+}
+
+/* =========================================================================
+   PAGE: Tasks (tabs: current / scheduled / waiting / done)
+   ========================================================================= */
+function pageTasks(){
+  const tab = state.taskTab || 'current';
+  const tabs = [['current','Current'],['done','Done']];
+  let body = '';
+  if(tab==='current'){
+    const view = state.taskView || 'board';
+    body = `<div class="view-toggle">
+      <button class="seg-btn ${view==='board'?'active':''}" onclick="state.taskView='board'; save(); render();">Board</button>
+      <button class="seg-btn ${view==='list'?'active':''}" onclick="state.taskView='list'; save(); render();">By category</button>
+    </div>` + (view==='board' ? renderBoard() : renderCategoryBoard());
+  } else {
+    let list = state.tasks.filter(t => t.done && (!state.taskAreaFilter || t.area===state.taskAreaFilter));
+    list = list.sort((a,b)=>(b.completedAt||'').localeCompare(a.completedAt||''));
+    body = list.length ? list.map(t=>renderTaskRow(t)).join('') : `<div class="plan-empty">Nothing here.</div>`;
+    body = `<div style="display:flex; flex-direction:column; gap:6px;">${body}</div>`;
+  }
+  const areaFilter = state.taskAreaFilter ? areaOf(state.taskAreaFilter) : null;
+  return `
+  <div class="page-head"><h1>Tasks</h1><div style="display:flex; gap:8px;"><button class="btn btn-sm" onclick="openCategoryModal()">${icon('plus',13)} Category</button><button class="btn btn-primary btn-sm" onclick="openTaskModal()">${icon('plus',13)} Task</button></div></div>
+  ${areaFilter?`<div class="filter-chips"><button class="filter-chip active" onclick="state.taskAreaFilter=''; save(); render();"><span class="dot" style="background:${catOf(areaFilter.categoryId).color}"></span>${escapeHtml(areaFilter.name)} ×</button></div>`:''}
+  <div class="tabs">${tabs.map(([id,label])=>`<button class="tab ${tab===id?'active':''}" onclick="state.taskTab='${id}'; save(); render();">${label}</button>`).join('')}</div>
+  ${body}`;
+}
+function miniTaskHtml(t,c){
+  return `<div class="mini-task" style="--cat-color:${c.color}" onclick="openTaskModal('${t.id}')"><div class="task-check" style="margin-top:1px;" onclick="event.stopPropagation(); toggleDone('${t.id}')">${icon('check',10)}</div><div><div class="t">${escapeHtml(t.title)}</div><div class="m">${t.due?`<span class="${dueClass(t)==='overdue'?'meta-tag overdue':''}">${escapeHtml(dueText(t))}</span>`:''}${t.scheduled&&t.date?`<span>${fmtShort(t.date)}${t.start?' · '+t.start:''}</span>`:''}${t.waitingOn?`<span class="meta-tag waiting">waiting · ${escapeHtml(waitingLabel(t.waitingOn))}</span>`:''}<span>${t.effort}</span>${checklistBadge(t)}${isAttention(t)?'<span class="meta-tag attention">attention</span>':''}</div></div></div>`;
+}
+function taskMatchesArea(t){ return !state.taskAreaFilter || t.area===state.taskAreaFilter; }
+function currentOpenTasks(){ return state.tasks.filter(t=>!t.done && !t.hiddenUntilReset && !isSnoozed(t) && taskMatchesArea(t)); }
+function renderCategoryBoard(){
+  return `<div class="cat-board">${state.categories.map(c=>{
+    const all = sortTasks(currentOpenTasks().filter(t=>t.category===c.id));
+    const soon = all.filter(withinHorizon);
+    const later = all.filter(t=>!withinHorizon(t) && !isStaleUndated(t));
+    const key = 'catLater_'+c.id;
+    const expanded = !!state[key];
+    return `<div class="cat-card">
+      <div class="cat-card-head"><span class="category-color-swatch" style="background:${c.color}"></span><span class="cat-card-title">${escapeHtml(c.name)}</span><span class="cat-card-count">${soon.length}</span><button class="icon-btn" onclick="openTaskModal(); setTimeout(()=>{document.getElementById('tm-cat').value='${c.id}'; const a=document.getElementById('tm-area'); if(a&&[...a.options].some(o=>o.value==='${c.id}')) a.value='${c.id}';},10)">${icon('plus',15)}</button></div>
+      <div class="cat-card-body">
+        ${soon.slice(0,6).map(t=>miniTaskHtml(t,c)).join('') || `<div class="plan-empty">Nothing current.</div>`}
+        ${later.length ? `<button class="more-link" onclick="toggleCatLater('${c.id}')">${expanded?'Hide':`+${later.length} later (beyond ${state.horizonDays||14}d)`}</button>` : ''}
+        ${expanded ? later.map(t=>miniTaskHtml(t,c)).join('') : ''}
+      </div></div>`;
+  }).join('')}</div>`;
+}
+function toggleCatLater(catId){ const key='catLater_'+catId; state[key]=!state[key]; save(); render(); }
+function activeBoardCatFilter(){ return state.boardCatFilter && state.boardCatFilter.length ? state.boardCatFilter : state.categories.map(c=>c.id); }
+function toggleBoardCatFilter(catId){
+  const all = state.categories.map(c=>c.id);
+  let cur = state.boardCatFilter && state.boardCatFilter.length ? [...state.boardCatFilter] : [];
+  if(!cur.length){ state.boardCatFilter=[catId]; save(); render(); return; }
+  if(cur.includes(catId)){
+    cur = cur.filter(c=>c!==catId);
+    state.boardCatFilter = cur.length ? cur : [];
+  } else {
+    cur.push(catId);
+    state.boardCatFilter = cur.length===all.length ? [] : cur;
+  }
+  save(); render();
+}
+function renderBoardFilterChips(){
+  const active = activeBoardCatFilter();
+  const allActive = active.length === state.categories.length;
+  return `<div class="filter-chips">
+    <button class="filter-chip ${allActive?'active':''}" onclick="state.boardCatFilter=[]; save(); render();">All</button>
+    ${state.categories.map(c=>`<button class="filter-chip ${active.includes(c.id)?'active':''}" style="${active.includes(c.id)?`--chip-color:${c.color}`:''}" onclick="toggleBoardCatFilter('${c.id}')"><span class="dot" style="background:${c.color}"></span>${escapeHtml(c.name)}</button>`).join('')}
+  </div>`;
+}
+function renderBoard(){
+  const catFilter = activeBoardCatFilter();
+  const pool = state.tasks.filter(t=>!t.hiddenUntilReset && !t.done && !isSnoozed(t) && taskMatchesArea(t) && catFilter.includes(t.category));
+  const cols = [
+    {id:'todo', label:'Not started', items: sortTasks(pool.filter(t=>!t.waitingOn && !t.scheduled && withinHorizon(t)))},
+    {id:'waiting', label:'Waiting', items: sortTasks(pool.filter(t=>t.waitingOn && withinHorizon(t)))},
+    {id:'scheduled', label:'Scheduled', items: sortTasks(pool.filter(t=>t.scheduled && withinHorizon(t)))},
+  ];
+  const later = sortTasks(pool.filter(t=>!withinHorizon(t) && !isStaleUndated(t)));
+  const laterCount = later.length;
+  return `${renderBoardFilterChips()}<div class="board">${cols.map(col=>`
+    <div class="board-col" id="col-${col.id}" ondragover="onColDragOver(event,'${col.id}')" ondragleave="onColDragLeave(event,'${col.id}')" ondrop="onDropToColumn(event,'${col.id}')">
+      <div class="board-col-head"><span>${col.label}</span><span class="cat-card-count">${col.items.length}</span></div>
+      <div class="board-col-body">${col.items.map(t=>`
+        <div class="board-card" draggable="true" ondragstart="onDragStart(event,'${t.id}')" onclick="openTaskModal('${t.id}')" style="border-left:3px solid ${catOf(t.category).color}">
+          <div class="t">${escapeHtml(t.title)}</div>
+          <div class="m">${t.due?`<span class="${dueClass(t)==='overdue'?'meta-tag overdue':''}">${escapeHtml(dueText(t))}</span>`:''}${t.importance>=4?importanceDots(t.importance):''}${checklistBadge(t)}${t.repeat&&t.repeat!=='none'?icon('repeat',10):''}</div>
+        </div>`).join('') || `<div class="plan-empty">Empty</div>`}</div>
+    </div>`).join('')}</div>
+  ${laterCount ? `<button class="more-link" onclick="state.horizonExpanded=!state.horizonExpanded; save(); render();" style="margin-top:12px;">${state.horizonExpanded?'Hide later items':`Show ${laterCount} item${laterCount===1?'':'s'} outside the ${state.horizonDays||14}-day focus window`}</button>` : ''}
+  ${state.horizonExpanded ? `<div style="margin-top:10px; display:flex; flex-direction:column; gap:6px;">${later.map(t=>renderTaskRow(t)).join('')}</div>` : ''}`;
+}
+function onColDragOver(e,colId){ e.preventDefault(); document.getElementById('col-'+colId).classList.add('dragover'); }
+function onColDragLeave(e,colId){ document.getElementById('col-'+colId).classList.remove('dragover'); }
+function onDropToColumn(e, colId){
+  e.preventDefault();
+  document.querySelectorAll('.board-col').forEach(c=>c.classList.remove('dragover'));
+  const t = state.tasks.find(x=>x.id===dragId); if(!t) return;
+  const prev = {done:t.done, completedAt:t.completedAt, waitingOn:t.waitingOn, scheduled:t.scheduled, date:t.date, start:t.start};
+  let spawned = null;
+  if(colId==='todo'){ t.done=false; t.waitingOn=''; t.scheduled=false; }
+  if(colId==='waiting'){ t.done=false; if(!t.waitingOn) t.waitingOn={id:uid('w'),what:'Pending follow-up',who:'',sinceDate:localISO(),projectId:t.projectId||''}; }
+  if(colId==='scheduled'){ t.done=false; t.scheduled=true; if(!t.date) t.date=localISO(); if(!t.start) t.start='09:00'; }
+  if(colId==='done'){ t.done=true; t.completedAt=new Date().toISOString(); if(t.repeat && t.repeat!=='none') spawned=spawnNextOccurrence(t); }
+  t.lastTouchedAt = new Date().toISOString();
+  save(); render();
+  const labels = {todo:'Not started', waiting:'Waiting', scheduled:'Scheduled', done:'Done'};
+  toast('Moved to '+(labels[colId]||colId), 'Undo', ()=>{
+    Object.assign(t, prev);
+    if(spawned){ state.tasks = state.tasks.filter(x=>x.id!==spawned.id); }
+    save(); render();
+  });
+}
+function openCategoryModal(id){
+  const c = id ? state.categories.find(x=>x.id===id) : null;
+  const isNew = !c;
+  const colors = ['#2F6F68','#4F6F8F','#7FA98C','#D98E6B','#B99356','#C77979','#5D91A8'];
+  document.getElementById('task-modal').innerHTML = `
+    <h3>${isNew?'New category':'Edit category'}</h3>
+    <div class="field-row"><label>Name</label><input id="cm-name" value="${c?escapeHtml(c.name):''}" placeholder="e.g. Research"></div>
+    <div class="field-row"><label>Accent color</label><div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;">${colors.map(col=>`<div class="color-swatch-btn" style="background:${col}; ${c&&c.color===col?'box-shadow:0 0 0 2px #fff,0 0 0 4px '+col+';':''}" onclick="selectSwatch(this,'${col}')"></div>`).join('')}</div><input type="hidden" id="cm-color" value="${c?c.color:colors[0]}"></div>
+    <div class="modal-actions"><div>${!isNew?`<button class="btn btn-sm btn-danger" onclick="deleteCategory('${c.id}')">Delete</button>`:'<span></span>'}</div><div style="display:flex; gap:8px;"><button class="btn btn-sm" onclick="closeTaskModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="saveCategoryModal('${isNew?'':c.id}')">Save</button></div></div>`;
+  document.getElementById('task-modal-overlay').classList.add('open');
+}
+function selectSwatch(el,color){ document.querySelectorAll('.color-swatch-btn').forEach(s=>s.style.boxShadow=''); el.style.boxShadow='0 0 0 2px #fff, 0 0 0 4px '+color; document.getElementById('cm-color').value=color; }
+function saveCategoryModal(id){
+  const name = document.getElementById('cm-name').value.trim() || 'Untitled';
+  const color = document.getElementById('cm-color').value;
+  if(id){ const c=state.categories.find(x=>x.id===id); c.name=name; c.color=color; } else { state.categories.push({id:uid('c'), name, color}); }
+  save(); closeTaskModal(); render(); toast('Category saved');
+}
+function deleteCategory(id){
+  const fallback = state.categories.find(c=>c.id==='personal' && c.id!==id) || state.categories.find(c=>c.id!==id);
+  if(!fallback){ toast('Keep at least one category'); return; }
+  state.tasks.forEach(t=>{ if(t.category===id) t.category=fallback.id; });
+  state.areas.forEach(a=>{ if(a.categoryId===id) a.categoryId=fallback.id; });
+  state.categories = state.categories.filter(c=>c.id!==id);
+  state.boardCatFilter = (state.boardCatFilter||[]).filter(c=>c!==id);
+  save(); closeTaskModal(); render(); toast(`Category deleted — tasks moved to ${fallback.name}`);
+}
+
+/* =========================================================================
+   PAGE: Plan
+   ========================================================================= */
+function pagePlan(){
+  const today = localISO();
+  const att = sortTasks(activeTasks().filter(isAttention));
+  const upcoming = sortTasks(activeTasks().filter(t=>!isAttention(t) && !isSnoozed(t) && t.due && diffDays(t.due,today)>=0 && diffDays(t.due,today)<=7));
+  const waiting = sortTasks(activeTasks().filter(t=>t.waitingOn));
+  const snoozed = sortTasks(activeTasks().filter(isSnoozed));
+  const review = sortTasks(activeTasks().filter(isStaleUndated));
+  const unscheduled = sortTasks(activeTasks().filter(t=>!t.due && !t.scheduled && !t.waitingOn && !isSnoozed(t) && !isStaleUndated(t)));
+  return `
+  <div class="page-head"><h1>Plan</h1></div>
+  <div class="page-sub">A decision layer over Tasks — only what needs a decision, nothing you've already handled.</div>
+  ${att.length ? `<div class="section-label">Needs attention</div><div class="plan-attention-strip">${att.map(t=>`
+    <div class="attention-card"><div class="a-title">${escapeHtml(t.title)}</div><div class="a-meta">${escapeHtml(dueText(t)||'stale — untouched a while')}</div>
+    <div class="a-actions"><button class="btn btn-sm btn-primary" onclick="openTaskModal('${t.id}')">Open</button><button class="btn btn-sm" onclick="updateTask('${t.id}',{snoozedUntil:addDays(localISO(),2)}); render(); toast('Snoozed 2 days')">Snooze</button></div></div>`).join('')}</div>` : ''}
+  <div class="plan-cols">
+    <div>
+      <div class="plan-panel"><h2>Due in the next 7 days</h2><div class="rows">${upcoming.length?upcoming.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">Nothing due in the next 7 days.</div>`}</div></div>
+      <div class="plan-panel"><h2>Waiting on someone</h2><div class="rows">${waiting.length?waiting.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">Nothing waiting.</div>`}</div></div>
+      <div class="plan-panel"><h2>Review · untouched ${state.staleDays||21}+ days</h2><div class="rows">${review.length?review.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">Nothing stale to review.</div>`}</div></div>
+      <div class="plan-panel"><h2>Unscheduled</h2><div class="rows">${unscheduled.length?unscheduled.slice(0,8).map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">Nothing unscheduled.</div>`}</div></div>
+    </div>
+    <div>
+      <div class="plan-panel">
+        <h2>At a glance</h2>
+        <div class="metric-row"><span>Needs attention</span><b>${att.length}</b></div>
+        <div class="metric-row"><span>Due in 7 days</span><b>${upcoming.length}</b></div>
+        <div class="metric-row"><span>Waiting</span><b>${waiting.length}</b></div>
+        <div class="metric-row"><span>Review</span><b>${review.length}</b></div>
+        <div class="metric-row"><span>Snoozed</span><b>${snoozed.length}</b></div>
+      </div>
+      <div class="plan-panel"><h2>Snoozed</h2><div class="rows">${snoozed.length?snoozed.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">Nothing snoozed.</div>`}</div></div>
+    </div>
+  </div>`;
+}
+
+function openCalendarDate(iso){ state.weekStart=mondayOf(new Date(iso+'T12:00:00')).getTime(); state.calendarSelectedDate=iso; save(); navigate('calendar'); }
+
+/* =========================================================================
+   PAGE: Calendar
+   ========================================================================= */
+function pageCalendar(){
+  const start = new Date(state.weekStart);
+  const days = [...Array(7)].map((_,i)=>{ const d=new Date(start); d.setDate(d.getDate()+i); return d; });
+  const hours = [...Array(15)].map((_,i)=>i+7);
+  const bg = state.calendarBg || {type:'color', value:'#F7F8FA'};
+  const bgStyle = bg.type==='image' ? `background-image:linear-gradient(rgba(255,255,255,.1),rgba(255,255,255,.1)), url('${bg.value}');` : `background-color:${bg.value};`;
+  function dayEvents(day){
+    const iso=localISO(day);
+    return calendarItemsForDate(iso).map(item=>({title:item.title,start:item.start||'09:00',color:item.source==='gcal'?'#6B7280':catOf(item.category).color,item}));
+  }
+  return `
+  <div class="page-head"><h1>Calendar</h1>
+    <div style="display:flex; gap:6px; align-items:center;">
+      <span class="subtle">Background</span>
+      ${['#F7F8FA','#EAF0FA','#F3ECFA','#EAF6EE','#FBF0E4'].map(c=>`<div class="color-swatch-btn" style="background:${c}" onclick="setCalBgColor('${c}')"></div>`).join('')}
+      <button class="btn btn-sm" onclick="document.getElementById('cal-img-input').click()">Image…</button>
+      <input type="file" id="cal-img-input" accept="image/*" style="display:none" onchange="onCalImage(event)">
+    </div>
+  </div>
+  <div class="cal-wrap" style="${bgStyle}">
+    <div class="cal-toolbar">
+      <button class="icon-btn" onclick="shiftWeek(-1)">‹</button>
+      <h3>${days[0].toLocaleDateString(undefined,{month:'short',day:'numeric'})} – ${days[6].toLocaleDateString(undefined,{month:'short',day:'numeric'})}</h3>
+      <button class="icon-btn" onclick="shiftWeek(1)">›</button>
+      <button class="btn btn-sm" onclick="state.weekStart=mondayOf(new Date()).getTime(); render();" style="margin-left:auto;">Today</button>
+      <button class="btn btn-sm btn-primary" onclick="openTaskModal(); setTimeout(()=>document.getElementById('tm-scheduled').checked=true,10)">${icon('plus',12)} Scheduled item</button>
+    </div>
+    <div class="cal-grid">
+      <div class="cal-hourlabel"></div>
+      ${days.map(d=>`<div class="cal-daylabel ${localISO(d)===localISO()?'today':''}">${d.toLocaleDateString(undefined,{weekday:'short'})} <span style="color:var(--ink-faint)">${d.getDate()}</span></div>`).join('')}
+      ${hours.map(h=>`
+        <div class="cal-hourlabel">${h%12||12}${h<12?'a':'p'}</div>
+        ${days.map(d=>{ const evs = dayEvents(d).filter(e=>parseInt((e.start||'9').split(':')[0],10)===h);
+          return `<div class="cal-cell">${evs.map(e=>`<div class="cal-event" style="top:2px; background:${e.color}" onclick='openCalendarItem(${JSON.stringify(e.item).replace(/'/g,"&#39;")})' title="${escapeHtml(e.title)}">${e.item.source==='gcal'?'<span class="gcal-mark" style="margin-right:4px;background:#fff;color:#555">G</span>':''}${escapeHtml(e.title)}</div>`).join('')}</div>`; }).join('')}
+      `).join('')}
+    </div>
+  </div>
+  <p class="subtle" style="margin-top:12px;">HQ scheduled items are editable here. Google Calendar events are read-only and open in Google Calendar. Due dates alone stay on Plan and Tasks.</p>`;
+}
+function shiftWeek(dir){ const d=new Date(state.weekStart); d.setDate(d.getDate()+dir*7); state.weekStart=d.getTime(); render(); }
+function setCalBgColor(value){ state.calendarBg = {type:'color', value}; save(); render(); }
+function onCalImage(e){
+  const f = e.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1600/img.width, 1000/img.height);
+      const c = document.createElement('canvas'); c.width = Math.round(img.width*scale); c.height = Math.round(img.height*scale);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      state.calendarBg = {type:'image', value:c.toDataURL('image/jpeg',.82)}; save(); render();
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(f);
+}
+function openBgPicker(){ /* clicking the swatches directly on the page covers this; kept for palette action */ toast('Pick a background color or image at the top of Calendar'); }
+
+/* =========================================================================
+   PAGE: Notes
+   ========================================================================= */
+function pageNotes(){
+  if(!notesActiveId && state.notes.length) notesActiveId = state.notes[0].id;
+  const active = state.notes.find(n=>n.id===notesActiveId);
+  const sorted = [...state.notes].sort((a,b)=>(b.updated||0)-(a.updated||0));
+  return `
+  <div class="notes-layout">
+    <div class="notes-list">
+      <button class="btn btn-sm" style="width:100%; margin-bottom:8px;" onclick="newNote()">${icon('plus',13)} New note</button>
+      ${sorted.map(n=>`<div class="note-item ${n.id===notesActiveId?'active':''}" onclick="notesActiveId='${n.id}'; render();"><div class="note-item-title">${escapeHtml(n.title||'Untitled')}</div><div class="note-item-preview">${escapeHtml((n.body||'').slice(0,60))}</div></div>`).join('')}
+    </div>
+    <div class="note-editor">
+      ${active ? `<div style="display:flex; gap:10px; align-items:flex-start;"><input class="note-title-input" id="note-title" value="${escapeHtml(active.title)}" placeholder="Title"><button class="btn btn-sm" onclick="deleteNote('${active.id}')" style="color:var(--danger); flex:none;">Delete</button></div><div class="subtle" style="margin-bottom:14px;">${active.updated?new Date(active.updated).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):''}</div><textarea id="note-body" placeholder="Start writing…">${escapeHtml(active.body)}</textarea>`
+                : `<div class="empty-state">${icon('notes',34)}<p>No note selected.</p></div>`}
+    </div>
+  </div>`;
+}
+function bindNotesEvents(){
+  const t=document.getElementById('note-title'), b=document.getElementById('note-body'); if(!t) return;
+  const active = state.notes.find(n=>n.id===notesActiveId);
+  [t,b].forEach(el=>el.addEventListener('input', ()=>{ active.title=t.value; active.body=b.value; active.updated=Date.now(); save();
+    const item=document.querySelector('.note-item.active'); if(item){ item.querySelector('.note-item-title').textContent=t.value||'Untitled'; item.querySelector('.note-item-preview').textContent=b.value.slice(0,60); } }));
+}
+function newNote(){ const n={id:uid('n'), title:'', body:'', updated:Date.now()}; state.notes.push(n); notesActiveId=n.id; save(); render(); }
+function deleteNote(id){
+  const idx=state.notes.findIndex(n=>n.id===id); if(idx<0) return;
+  const removed=state.notes[idx]; state.notes.splice(idx,1);
+  notesActiveId=state.notes[0]?.id||null; save(); render();
+  toast('Note deleted','Undo',()=>{ state.notes.splice(Math.min(idx,state.notes.length),0,removed); notesActiveId=removed.id; save(); render(); });
+}
+
+/* =========================================================================
+   PAGE: Projects — thinking layer above Tasks
+   ========================================================================= */
+function openProject(id){ state.activeProjectId=id; save(); navigate('projects'); }
+function backToProjects(){ state.activeProjectId=''; save(); render(); }
+function renderWorkflowFeedback(projectId){ const f=state.workflowFeedback; if(!f||f.projectId!==projectId||!f.lines?.length) return ''; return `<div class="workflow-strip">${f.lines.map(x=>`<div class="wf-line">→ <span>${escapeHtml(x)}</span></div>`).join('')}</div>`; }
+function openProjectModal(id=''){
+  const p=id?projectOf(id):null; const d=p||{name:'',goal:'',area:'personal',category:'personal',status:'active'};
+  document.getElementById('task-modal').innerHTML=`<h3>${p?'Edit project':'New project'}</h3>
+    <div class="field-row"><label>Name</label><input id="pm-name" value="${escapeHtml(d.name)}" placeholder="e.g. APHA Presentation"></div>
+    <div class="field-row"><label>Goal</label><textarea id="pm-goal" placeholder="What does success look like?">${escapeHtml(d.goal||'')}</textarea></div>
+    <div class="two-col"><div class="field-row"><label>Area</label><select id="pm-area">${state.areas.map(a=>`<option value="${a.id}" ${a.id===d.area?'selected':''}>${escapeHtml(a.name)}</option>`).join('')}</select></div><div class="field-row"><label>Status</label><select id="pm-status">${['active','waiting','dormant','done'].map(x=>`<option value="${x}" ${x===d.status?'selected':''}>${x}</option>`).join('')}</select></div></div>
+    <div class="modal-actions"><div></div><div style="display:flex;gap:8px;"><button class="btn btn-sm" onclick="closeTaskModal()">Cancel</button><button class="btn btn-primary btn-sm" onclick="saveProjectModal('${id}')">Save</button></div></div>`;
+  document.getElementById('task-modal-overlay').classList.add('open'); setTimeout(()=>document.getElementById('pm-name').focus(),20);
+}
+function saveProjectModal(id=''){
+  const name=document.getElementById('pm-name').value.trim()||'Untitled project', goal=document.getElementById('pm-goal').value.trim(), area=document.getElementById('pm-area').value, status=document.getElementById('pm-status').value; const areaObj=areaOf(area); const category=areaObj?.categoryId||'personal';
+  if(id){ const p=projectOf(id); Object.assign(p,{name,goal,area,status,category}); }
+  else { const p={id:uid('p'),name,goal,area,category,status,activity:[],waiting:[]}; state.projects.push(p); state.activeProjectId=p.id; }
+  save(); document.getElementById('task-modal-overlay').classList.remove('open'); render(); toast('Project saved');
+}
+function resetProjectDismissedSuggestions(projectId){ (state.suggestions||[]).filter(s=>s.projectId===projectId&&s.status==='dismissed').forEach(s=>{s.status='pending';s.resolvedAt='';}); save(); render(); toast('Dismissed suggestions restored'); }
+function pageProjects(){
+  const active=projectOf(state.activeProjectId);
+  if(active) return pageProjectDetail(active);
+  return `<div class="page-head"><div><h1>Projects</h1><span class="subtle">Where things stand, what changed, and what can happen next</span></div><button class="btn btn-primary btn-sm" onclick="openProjectModal()">${icon('plus',13)} Project</button></div><div class="project-grid"> ${(state.projects||[]).map(p=>{
+    const ts=projectTasks(p.id), open=ts.filter(t=>!t.done), waiting=(p.waiting||[]).length+open.filter(t=>t.waitingOn).length, ready=open.filter(t=>!t.waitingOn&&!isBlocked(t)).length, sug=pendingSuggestions(p.id).length;
+    return `<button class="project-card" onclick="openProject('${p.id}')"><div class="project-card-head"><span class="category-color-swatch" style="background:${catOf(p.category).color}"></span><span class="project-card-title">${escapeHtml(p.name)}</span><span class="project-status">${escapeHtml(p.status||'active')}</span></div><div class="subtle">${escapeHtml(p.goal||'')}</div><div class="project-state">${escapeHtml(computedProjectState(p))}</div><div class="project-metrics"><span>${ready} ready</span>${waiting?`<span>${waiting} waiting</span>`:''}${sug?`<span>${sug} suggested</span>`:''}</div></button>`;
+  }).join('')}</div>`;
+}
+function pageProjectDetail(p){
+  const ts=projectTasks(p.id); const ready=sortTasks(ts.filter(t=>!t.done&&!t.hiddenUntilReset&&!t.waitingOn&&!isBlocked(t))); const blocked=sortTasks(ts.filter(t=>!t.done&&isBlocked(t))); const taskWaiting=ts.filter(t=>!t.done&&t.waitingOn); const waiting=[...(p.waiting||[]),...taskWaiting.map(t=>({...t.waitingOn,taskId:t.id}))]; const acts=(p.activity||[]).slice().reverse().slice(0,8); const suggestions=pendingSuggestions(p.id);
+  return `<div class="page-head"><div><button class="more-link" onclick="backToProjects()" style="padding:0 0 6px;">← Projects</button><h1>${escapeHtml(p.name)}</h1></div><div style="display:flex;gap:8px;align-items:center;"><span class="project-status">${escapeHtml(p.status||'active')}</span><button class="btn btn-sm" onclick="openProjectModal('${p.id}')">Edit</button></div></div>
+  <div class="project-brief"><h2>Goal</h2><div>${escapeHtml(p.goal||'')}</div><div class="section-label" style="margin-top:16px;">Where this stands</div><div class="project-state">${escapeHtml(computedProjectState(p))}</div></div>
+  <div class="update-hq"><input type="hidden" id="hq-update-project" value="${p.id}"><input id="hq-update-input" placeholder="Update this project — what happened or changed?" onkeydown="if(event.key==='Enter')logHQUpdate()"><button class="btn btn-sm btn-primary" onclick="logHQUpdate()">Update HQ</button></div>
+  ${renderWorkflowFeedback(p.id)}
+  ${waiting.length?`<div class="project-section"><div class="section-label">Waiting on</div>${waiting.map(w=>`<div class="waiting-card"><div class="waiting-body"><div class="waiting-title">${escapeHtml(w.what||w.who||'Waiting')}</div><div class="waiting-meta">${w.who?escapeHtml(w.who)+' · ':''}since ${fmtShort(w.sinceDate||localISO())}</div></div></div>`).join('')}</div>`:''}
+  <div class="project-section"><div class="section-label">Next actions</div><div style="display:flex;flex-direction:column;gap:6px;">${ready.length?ready.map(t=>renderTaskRow(t)).join(''):`<div class="plan-empty">No ready actions.</div>`}</div></div>
+  ${blocked.length?`<div class="project-section"><div class="section-label">Blocked</div><div style="display:flex;flex-direction:column;gap:6px;">${blocked.map(t=>renderTaskRow(t)).join('')}</div></div>`:''}
+  ${suggestions.length?`<div class="project-section"><div class="section-label">Suggested next</div>${(expandedSuggestionProjects.has(p.id)?suggestions:suggestions.slice(0,PROJECT_SUGGESTION_LIMIT)).map(renderSuggestionCard).join('')}${!expandedSuggestionProjects.has(p.id)&&suggestions.length>PROJECT_SUGGESTION_LIMIT?`<button class="more-link" onclick="expandedSuggestionProjects.add('${p.id}');render();">+${suggestions.length-PROJECT_SUGGESTION_LIMIT} more suggested</button>`:''}</div>`:''}${(state.suggestions||[]).some(s=>s.projectId===p.id&&s.status==='dismissed')?`<button class="more-link" onclick="resetProjectDismissedSuggestions('${p.id}')">Reconsider dismissed suggestions</button>`:''}
+  <div class="project-section"><div class="section-label">Recently</div><div class="project-brief activity-list">${acts.length?acts.map(a=>`<div class="activity-row"><span class="activity-dot"></span><div class="activity-text">${escapeHtml(a.text)}</div><span class="activity-date">${fmtShort(a.date.slice(0,10))}</span></div>`).join(''):`<div class="plan-empty">No project history yet. Use Update HQ or complete a project task.</div>`}</div></div>`;
+}
+
+/* =========================================================================
+   PAGE: Areas
+   ========================================================================= */
+function openArea(id){ state.taskAreaFilter=id; state.taskTab='current'; state.taskView='list'; save(); navigate('tasks'); }
+function pageAreas(){
+  return `
+  <div class="page-head"><h1>Areas</h1><span class="subtle">Living context — tasks stay in Tasks</span></div>
+  <div class="area-grid">
+    ${state.areas.map(a=>{
+      const cat = catOf(a.categoryId);
+      const ts = state.tasks.filter(t=>t.area===a.id && !t.done);
+      const soon = ts.filter(t=>t.due && diffDays(t.due, localISO())<=7 && diffDays(t.due, localISO())>=0).length;
+      return `<button class="area-card" onclick="openArea('${a.id}')">
+        <div class="area-card-head"><span class="area-icon" style="background:${cat.color}"></span><h3 style="font-size:14.5px;">${escapeHtml(a.name)}</h3></div>
+        <div class="subtle">${escapeHtml(a.note)}</div>
+        <div class="area-stats"><span>${ts.length} open</span><span>${soon} due soon</span></div>
+      </button>`;
+    }).join('')}
+  </div>`;
+}
+
+/* =========================================================================
+   PAGE: Inbox
+   ========================================================================= */
+function pageInbox(){
+  const items=pendingSuggestions().filter(s=>!s.projectId || s.sourceType==='external');
+  return `<div class="page-head"><h1>Inbox</h1></div><div class="page-sub">Cross-project and external suggestions — nothing becomes a task until you approve it.</div>${items.length===0?`<div class="empty-state">${icon('inbox',34)}<p>Inbox is clear.</p></div>`:items.map(renderSuggestionCard).join('')}<p class="subtle" style="margin-top:18px;">Project-specific suggestions appear inside Projects so they stay with their context.</p>`;
+}
+function approveSuggestion(id){ acceptWorkflowSuggestion(id); }
+function dismissSuggestion(id){ dismissWorkflowSuggestion(id); }
+
+/* =========================================================================
+   PAGE: Weekly Reset
+   ========================================================================= */
+function pageReset(){
+  const list = resetItems();
+  return `
+  <div class="page-head"><h1>Weekly Reset</h1></div>
+  <div class="page-sub">Parked, overdue, or stale undated work that needs a keep/drop decision.</div>
+  ${list.length===0 ? `<div class="empty-state">${icon('check',34)}<p>Reset is clear.</p></div>` : `<div>${list.map(t=>`
+    <div class="reset-row">
+      <div style="flex:1;">${renderTaskRow(t)}</div>
+      <button class="btn btn-sm" onclick="updateTask('${t.id}',{hiddenUntilReset:false}); render(); toast('Kept — back in Tasks normally')">Keep</button>
+      <button class="btn btn-sm" onclick="deleteTaskWithUndo('${t.id}')" style="color:var(--ink-faint);">Drop</button>
+    </div>`).join('')}</div>`}`;
+}
+
+
+/* =========================================================================
+   PAGE: Google — intake + integration surface
+   ========================================================================= */
+const ZHQ_BRIDGE_URL=(location.protocol==='http:'||location.protocol==='https:')?location.origin:'https://zahra-hq-google-bridge.onrender.com';
+const ZHQ_CONNECTION_KEY='zhq-google-connection';
+function appsScriptBridgeAvailable(){ return true; }
+function zhqConnectionCode(){ return localStorage.getItem(ZHQ_CONNECTION_KEY)||''; }
+async function apiFetch(path, options={}){
+  const url=path.startsWith('http')?path:`${ZHQ_BRIDGE_URL}${path}`;
+  const headers={'Content-Type':'application/json',...(options.headers||{})};
+  const code=zhqConnectionCode(); if(code) headers['X-ZHQ-Connection']=code;
+  const r=await fetch(url,{...options,headers});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.error||`Request failed (${r.status})`);
+  return data;
+}
+async function hydrateBackendStatus(){
+  try{
+    const status=await apiFetch('/api/status',{headers:{}});
+    const connected=!!status.connected;
+    ['gcal','gmail','drive','sheets','cloud'].forEach(k=>{ if(!state.integrations[k])state.integrations[k]={connected:false,lastSyncedAt:''}; state.integrations[k].connected=connected; });
+    localStorage.setItem(DB_KEY,JSON.stringify(state));
+    return connected;
+  }catch(e){ console.warn('Backend status unavailable',e); return false; }
+}
+function waitingOnPayload(){
+  const items=[];
+  (state.projects||[]).forEach(p=>(p.waiting||[]).forEach(w=>items.push({projectId:p.id,waitingId:w.id,who:w.who||'',what:w.what||'',sinceDate:w.sinceDate||''})));
+  state.tasks.filter(t=>!t.done&&t.waitingOn).forEach(t=>items.push({projectId:t.projectId||'',taskId:t.id,waitingId:t.waitingOn.id,who:t.waitingOn.who||'',what:t.waitingOn.what||'',sinceDate:t.waitingOn.sinceDate||''}));
+  return items;
+}
+async function connectIntegration(kind){
+  localStorage.setItem('zhq-google-connect-kind',kind||'all');
+  const popup=window.open(`${ZHQ_BRIDGE_URL}/auth/google`,'zhq-google-auth','width=560,height=720');
+  if(!popup){ toast('Allow popups to connect Google'); return; }
+  toast('Complete Google authorization in the popup');
+}
+window.addEventListener('message',async(event)=>{
+  if(event.origin!==ZHQ_BRIDGE_URL)return;
+  if(event.data?.type!=='zhq-google-connected'||!event.data?.code)return;
+  localStorage.setItem(ZHQ_CONNECTION_KEY,event.data.code);
+  await hydrateBackendStatus(); render();
+  await syncCloudStateOnOpen(true); await syncExternalOnOpen(true);
+  toast('Google connected');
+});
+async function disconnectIntegration(kind){
+  try{ await apiFetch('/auth/logout',{method:'POST',body:'{}'}); }catch(e){}
+  localStorage.removeItem(ZHQ_CONNECTION_KEY);
+  ['gcal','gmail','drive','sheets','cloud'].forEach(k=>{ if(state.integrations?.[k]){state.integrations[k].connected=false;state.integrations[k].lastSyncedAt='';} });
+  state.externalCalendarEvents=[];
+  save();render();toast('Google disconnected');
+}
+function matchEmailToWaiting(email){
+  const hay=`${email?.from||''} ${email?.subject||''} ${email?.snippet||''}`.toLowerCase();
+  const matches=[];
+  // A single shared word used to be enough to fire a suggestion (ratio>=0.5 of a 2-word waiting item).
+  // Now: a lone-term waiting item ("Lucy") still needs its one term to hit, but anything with 2+ terms
+  // needs 2+ hits at a stricter ratio, so one generic overlapping word can't spawn a suggestion alone.
+  const strongEnough=(tokens,hit)=> tokens.length<=1 ? hit>=1 : (hit>=2 && hit/Math.min(tokens.length,3)>=0.66);
+  (state.projects||[]).forEach(p=>{ (p.waiting||[]).forEach(w=>{ const tokens=tokenize(`${w.who||''} ${w.what||''}`); const hit=tokens.filter(x=>hay.includes(x)).length; if(tokens.length && strongEnough(tokens,hit))matches.push({projectId:p.id,waitingId:w.id,score:hit}); }); });
+  state.tasks.filter(t=>!t.done&&t.waitingOn).forEach(t=>{ const w=t.waitingOn; const tokens=tokenize(`${w.who||''} ${w.what||''}`); const hit=tokens.filter(x=>hay.includes(x)).length; if(tokens.length && strongEnough(tokens,hit))matches.push({projectId:t.projectId||'',taskId:t.id,waitingId:w.id,score:hit}); });
+  return matches.sort((a,b)=>b.score-a.score);
+}
+async function syncExternalOnOpen(force=false){
+  if(window.__zhqDidOpenSync&&!force)return; window.__zhqDidOpenSync=true;
+  const connected=await hydrateBackendStatus(); if(!connected)return;
+  try{
+    if(state.integrations?.gcal?.connected){
+      const start=new Date(addDays(localISO(),-1)+'T00:00:00').toISOString();
+      const end=new Date(addDays(localISO(),45)+'T23:59:59').toISOString();
+      const payload=await apiFetch(`/api/calendar?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,{headers:{}});
+      state.externalCalendarEvents=(payload.events||[]).map(normalizeExternalCalendarEvent);
+      state.integrations.gcal.lastSyncedAt=new Date().toISOString();
+    }
+    let createdReal=false;
+    if(state.integrations?.gmail?.connected && waitingOnPayload().length){
+      const payload=await apiFetch('/api/waiting-email-matches',{method:'POST',body:JSON.stringify({waitingOn:waitingOnPayload()})});
+      const before=(state.suggestions||[]).length;
+      (payload.emails||[]).forEach(email=>{
+        const m={projectId:email.projectId||'',taskId:email.taskId||'',waitingId:email.waitingId||''};
+        if(!m.waitingId){ const fallback=matchEmailToWaiting(email)[0]; if(fallback)Object.assign(m,fallback); }
+        if(!m.waitingId)return;
+        createSuggestion({title:`Review reply: ${email.subject||email.from||'email'}`,reason:`A recent email from ${email.from||'someone'} may resolve something you are already waiting on.`,projectId:m.projectId||'',triggerKey:`gmail-waiting:${m.waitingId}:${email.id||email.subject||''}`,sourceType:'external',externalUrl:email.url||''});
+      });
+      state.integrations.gmail.lastSyncedAt=new Date().toISOString();
+      createdReal=(state.suggestions||[]).length>before;
+    }
+    // Refreshing the Gcal cache / sync timestamps alone isn't a real content edit — only bump the
+    // sync-versioning `updatedAt` (via save()) when something genuinely new (a suggestion) was created,
+    // otherwise just persist quietly so opening the app doesn't make this device look "newest".
+    if(createdReal) save(); else localStorage.setItem(DB_KEY, JSON.stringify(state));
+    render(); if(force)toast('Google sources synced');
+  }catch(e){ console.warn('Google sync skipped',e); if(force)toast('Google sync could not complete'); }
+}
+async function pushCloudState(){
+  if(!state.integrations?.cloud?.connected)return;
+  try{
+    const copy=JSON.parse(JSON.stringify(state));
+    const result=await apiFetch('/api/state',{method:'POST',body:JSON.stringify({state:copy})});
+    if(result?.ok){ state.integrations.cloud.lastSyncedAt=new Date().toISOString(); localStorage.setItem(DB_KEY,JSON.stringify(state)); }
+  }catch(e){ console.warn('Cloud save skipped',e); }
+}
+async function syncCloudStateOnOpen(force=false){
+  const connected=await hydrateBackendStatus(); if(!connected||!state.integrations?.cloud?.connected)return;
+  try{
+    const remote=await apiFetch('/api/state',{headers:{}});
+    if(remote?.state){
+      const remoteState=normalizeState(remote.state);
+      const localTime=Date.parse(state.updatedAt||0)||0, remoteTime=Date.parse(remoteState.updatedAt||0)||0;
+      if(remoteTime>localTime){ state=remoteState; localStorage.setItem(DB_KEY,JSON.stringify(state)); render(); if(force)toast('Loaded newer Google-synced HQ state'); }
+      else if(localTime>remoteTime){ await pushCloudState(); if(force)toast('Saved current HQ state to Google'); }
+      else if(force)toast('HQ state is already in sync');
+    } else { await pushCloudState(); if(force)toast('Google-backed HQ state created'); }
+  }catch(e){ console.warn('Cloud sync skipped',e); if(force)toast('Google state sync could not complete'); }
+}
+async function handleGoogleIntake(){
+  const el=document.getElementById('google-intake-input');
+  if(!el||!el.value.trim())return;
+  const raw=el.value.trim(); el.value='';
+  if(/^https?:\/\//i.test(raw)){
+    try{
+      const isSheet=/docs\.google\.com\/spreadsheets/i.test(raw);
+      const item=await apiFetch(isSheet?'/api/sheets/read':'/api/drive/read',{method:'POST',body:JSON.stringify({url:raw})});
+      const body=[item?.name||'Google item',item?.url||raw,item?.preview||''].filter(Boolean).join('\n\n');
+      const note={id:uid('n'),title:`${item?.type||'Google'} — ${item?.name||'Imported item'}`,body,updated:Date.now()};
+      state.notes.unshift(note); save();
+      if(item?.type==='Drive')state.integrations.drive.lastSyncedAt=new Date().toISOString();
+      if(item?.type==='Sheets')state.integrations.sheets.lastSyncedAt=new Date().toISOString();
+      toast(`${item?.type||'Google'} item imported`,'View',()=>{notesActiveId=note.id;navigate('notes');}); return;
+    }catch(e){ console.warn(e); toast('Could not read that Google link; saved it as a note instead'); }
+  }
+  const lower=raw.toLowerCase(); let source='Google';
+  if(lower.includes('mail.google.com')||lower.includes('gmail'))source='Gmail';
+  else if(lower.includes('calendar.google.com')||lower.includes('calendar'))source='Calendar';
+  else if(lower.includes('docs.google.com/spreadsheets')||lower.includes('sheet'))source='Sheets';
+  else if(lower.includes('drive.google.com')||lower.includes('docs.google.com'))source='Drive';
+  const note={id:uid('n'),title:`${source} intake`,body:raw,updated:Date.now()};
+  state.notes.unshift(note); save(); toast(`${source} item captured`,'View',()=>{notesActiveId=note.id;navigate('notes');});
+}
+function pageGoogle(){
+  return `<div class="page-head"><div><h1>Google</h1><span class="subtle">Bring in specific Google context without turning Google into another inbox.</span></div></div>
+  <div class="page-sub">Calendar is read-only in HQ. Gmail only checks replies against things you already marked Waiting On. Drive and Sheets are deliberate imports only.</div>
+  <div class="google-intake"><span class="g-label">Google input</span><input id="google-intake-input" placeholder="Paste a Drive / Docs / Sheets link you want to bring into HQ…" onkeydown="if(event.key==='Enter')handleGoogleIntake()"><button class="btn btn-sm btn-primary" onclick="handleGoogleIntake()">Add to HQ</button></div>
+  <div class="integration-grid">
+    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Drive</span><span class="integration-status">${state.integrations?.drive?.connected?'Connected':'Deliberate only'}</span></div><p>Read a specific Drive file only when you paste its link. No automatic Drive crawl.</p></div>
+    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Sheets</span><span class="integration-status">${state.integrations?.sheets?.connected?'Connected':'Deliberate only'}</span></div><p>Import a specific Sheet intentionally. HQ never converts a whole Sheet into tasks automatically.</p></div>
+  </div>`;
+}
+
+/* =========================================================================
+   PAGE: Settings
+   ========================================================================= */
+function pageSettings(){
+  const bridge=appsScriptBridgeAvailable();
+  return `
+  <div class="page-head"><h1>Settings</h1></div>
+  <div class="page-sub">${bridge?'Google bridge available. Local data remains the immediate working copy.':'Local file mode.'}</div>
+  <div class="settings-grid">
+    <div class="setting-card"><h3>Data</h3><p>Export a JSON backup before switching browsers or computers.</p>
+      <div class="setting-actions"><button class="btn btn-sm btn-primary" onclick="exportBackup()">${icon('download',13)} Export backup</button><button class="btn btn-sm" onclick="document.getElementById('backup-input').click()">${icon('upload',13)} Restore backup</button></div></div>
+    <div class="setting-card"><h3>Recovered data</h3><p>${recoverySummary()}. Adds only missing current/future tasks and projects; richer course/friend context stays archived for the next display layer.</p>
+      <div class="setting-actions">${state.recoveryAppliedAt?`<span class="integration-status">Recovered</span><span class="subtle">${fmtShort(state.recoveryAppliedAt.slice(0,10))}</span>`:`<button class="btn btn-sm btn-primary" onclick="applyRecoverySnapshot()">Restore recovered data</button>`}</div></div>
+    <div class="setting-card"><h3>Reset</h3><p>Restore the starter workspace. This deletes this browser's current Zahra HQ data.</p>
+      <div class="setting-actions"><button class="btn btn-sm btn-danger" onclick="resetToStarter()">Reset starter data</button></div></div>
+    <div class="setting-card"><h3>Focus window</h3><p>Scheduled dates and due dates further out than this stay tucked away until they're actually close.</p>
+      <div class="setting-actions" style="align-items:center;"><input type="number" min="1" max="90" value="${state.horizonDays||14}" style="width:70px;" onchange="state.horizonDays=parseInt(this.value,10)||14; save(); render(); toast('Focus window updated');"><span class="subtle">days ahead</span></div></div>
+    <div class="setting-card"><h3>Stale review</h3><p>Undated tasks untouched this long leave Current and move to Plan → Review instead of haunting your task list.</p>
+      <div class="setting-actions" style="align-items:center;"><input type="number" min="3" max="180" value="${state.staleDays||21}" style="width:70px;" onchange="state.staleDays=parseInt(this.value,10)||21; save(); render(); toast('Stale review window updated');"><span class="subtle">days untouched</span></div></div>
+    <div class="setting-card"><h3>Storage</h3><p>${state.tasks.length} tasks · ${(state.projects||[]).length} projects · ${state.notes.length} notes · ${pendingSuggestions().length} pending suggestions.</p></div>
+    <div class="setting-card"><h3>Notifications</h3><p>Zahra HQ never pushes calendar-event notifications. Home's today rail is the reminder surface; edits stay in the task modal.</p></div>
+    <div class="setting-card"><h3>Google Calendar</h3><p>Read-only source. Google events can appear on Home and Calendar; edits stay in Google Calendar. Sync runs on app-open only.</p><div class="setting-actions"><span class="integration-status">${state.integrations?.gcal?.connected?'Connected':'Not connected'}</span><span class="subtle">Last synced: ${state.integrations?.gcal?.lastSyncedAt?fmtShort(state.integrations.gcal.lastSyncedAt.slice(0,10)):'Never'}</span>${state.integrations?.gcal?.connected?`<button class="btn btn-sm" onclick="syncExternalOnOpen(true)">Sync now</button><button class="btn btn-sm" onclick="disconnectIntegration('gcal')">Disconnect</button>`:`<button class="btn btn-sm" onclick="connectIntegration('gcal')" ${bridge?'':'disabled'}>Connect</button>`}</div></div>
+    <div class="setting-card"><h3>Gmail</h3><p>Only checks replies against existing Waiting On items. It never mines your inbox for tasks.</p><div class="setting-actions"><span class="integration-status">${state.integrations?.gmail?.connected?'Connected':'Not connected'}</span><span class="subtle">Last synced: ${state.integrations?.gmail?.lastSyncedAt?fmtShort(state.integrations.gmail.lastSyncedAt.slice(0,10)):'Never'}</span>${state.integrations?.gmail?.connected?`<button class="btn btn-sm" onclick="syncExternalOnOpen(true)">Sync now</button><button class="btn btn-sm" onclick="disconnectIntegration('gmail')">Disconnect</button>`:`<button class="btn btn-sm" onclick="connectIntegration('gmail')" ${bridge?'':'disabled'}>Connect</button>`}</div></div>
+    <div class="setting-card"><h3>Google state sync</h3><p>Keeps the same Zahra HQ state across browsers/devices using one private Drive JSON file. Local storage remains the immediate working copy.</p><div class="setting-actions"><span class="integration-status">${state.integrations?.cloud?.connected?'Connected':'Not connected'}</span><span class="subtle">Last synced: ${state.integrations?.cloud?.lastSyncedAt?fmtShort(state.integrations.cloud.lastSyncedAt.slice(0,10)):'Never'}</span>${state.integrations?.cloud?.connected?`<button class="btn btn-sm" onclick="syncCloudStateOnOpen(true)">Sync now</button><button class="btn btn-sm" onclick="disconnectIntegration('cloud')">Disconnect</button>`:`<button class="btn btn-sm" onclick="connectIntegration('cloud')" ${bridge?'':'disabled'}>Connect</button>`}</div></div>
+    <div class="setting-card"><h3>Drive + Sheets</h3><p>Deliberate imports only. Connecting authorizes HQ to read a link you explicitly paste into Google input.</p><div class="setting-actions"><span class="integration-status">${state.integrations?.drive?.connected&&state.integrations?.sheets?.connected?'Connected':'Not connected'}</span>${state.integrations?.drive?.connected&&state.integrations?.sheets?.connected?`<button class="btn btn-sm" onclick="disconnectIntegration('drive');disconnectIntegration('sheets')">Disconnect</button>`:`<button class="btn btn-sm" onclick="connectIntegration('drive').then(()=>connectIntegration('sheets'))" ${bridge?'':'disabled'}>Connect</button>`}</div></div>
+  </div>`;
+}
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `Zahra-HQ-backup-${localISO()}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),500); toast('Backup exported');
+}
+document.getElementById('backup-input').addEventListener('change', e=>{
+  const f = e.target.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = () => { try{ const x = JSON.parse(r.result); if(!x || !x.tasks || !x.notes) throw new Error(); state = normalizeState(x); save(); render(); toast('Backup restored'); } catch(err){ alert('That file is not a valid Zahra HQ backup.'); } };
+  r.readAsText(f);
+});
+function resetToStarter(){
+  if(!confirm('Reset local Zahra HQ to starter data? This deletes current data in this browser.')) return;
+  localStorage.removeItem(DB_KEY); state = loadState(); render(); toast('Reset to starter data');
+}
+
+/* =========================================================================
+   Render dispatcher
+   ========================================================================= */
+function render(){
+  const fns = {home:pageHome, projects:pageProjects, tasks:pageTasks, plan:pagePlan, google:pageGoogle, calendar:pageCalendar, notes:pageNotes, areas:pageAreas, inbox:pageInbox, reset:pageReset, settings:pageSettings};
+  document.getElementById('page-content').innerHTML = (fns[currentRoute]||pageHome)();
+  document.getElementById('main').scrollTop = 0;
+  if(currentRoute==='home') bindHomeEvents();
+  if(currentRoute==='notes') bindNotesEvents();
+}
+
+/* =========================================================================
+   Theme + init
+   ========================================================================= */
+function toggleTheme(){ state.theme = state.theme==='dark' ? 'light' : 'dark'; applyTheme(); save(); }
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme', state.theme==='dark'?'dark':'light');
+  document.getElementById('theme-label').textContent = state.theme==='dark' ? 'Light mode' : 'Dark mode';
+  document.getElementById('theme-icon').textContent = state.theme==='dark' ? '☀' : '◐';
+}
+renderNav(); applyTheme(); render();
+(async()=>{ await hydrateBackendStatus(); render(); await syncCloudStateOnOpen(); await syncExternalOnOpen(); })();
+</script>
+</body>
+</html>
