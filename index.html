@@ -965,11 +965,17 @@ function resolveDependencies(completedTaskId){
   state.tasks.forEach(t=>{ if(!t.done && (t.blockedBy||[]).includes(completedTaskId) && !isBlocked(t)) newly.push(t); });
   return newly;
 }
+function isNegatedResolution(text){
+  return /\b(?:hasn['’]?t|hasnt|haven['’]?t|havent|hadn['’]?t|hadnt|didn['’]?t|didnt|not|never)\b.{0,28}\b(?:repl(?:y|ied)|confirm(?:ed)?|finish(?:ed)?|complete(?:d)?|receive(?:d)?|respond(?:ed)?)\b|\b(?:no reply|no response|no word|still waiting|waiting on)\b/i.test(String(text||''));
+}
 function resolveMatchingWaiting(projectId,text){
   const p=projectOf(projectId); if(!p) return [];
   const resolved=[]; const low=text.toLowerCase();
-  p.waiting=(p.waiting||[]).filter(w=>{ const terms=tokenize(`${w.what} ${w.who}`); const hit=terms.some(x=>x.length>3 && low.includes(x)); if(hit && /(confirm|repl|done|finish|received|yes|ready|complete)/i.test(text)){ resolved.push(w); return false; } return true; });
-  state.tasks.forEach(t=>{ if(t.projectId===projectId && t.waitingOn){ const label=waitingLabel(t.waitingOn); const hit=tokenize(label).some(x=>x.length>3 && low.includes(x)); if(hit && /(confirm|repl|done|finish|received|yes|ready|complete)/i.test(text)){ resolved.push(t.waitingOn); t.waitingOn=null; } } });
+  if(isNegatedResolution(text)) return resolved;
+  const resolution=/\b(confirm(?:ed)?|repl(?:y|ied)|respond(?:ed)?|done|finish(?:ed)?|received|yes|ready|complete(?:d)?)\b/i.test(text);
+  if(!resolution)return resolved;
+  p.waiting=(p.waiting||[]).filter(w=>{ const terms=tokenize(`${w.what} ${w.who}`); const hit=terms.some(x=>x.length>3 && low.includes(x)); if(hit){ resolved.push(w); return false; } return true; });
+  state.tasks.forEach(t=>{ if(t.projectId===projectId && t.waitingOn){ const label=waitingLabel(t.waitingOn); const hit=tokenize(label).some(x=>x.length>3 && low.includes(x)); if(hit){ resolved.push(t.waitingOn); t.waitingOn=null; } } });
   const anyWaiting=(p.waiting||[]).length + state.tasks.filter(t=>t.projectId===projectId&&!t.done&&t.waitingOn).length; if(!anyWaiting && p.status==='waiting') p.status='active';
   return resolved;
 }
@@ -1051,12 +1057,16 @@ function inferProjectFromText(text){
   const low=String(text||'').toLowerCase();
   const aliases={
     'gumaps-mentorship':['mentor','mentee','mentorship','when2meet','kickoff coffee'],
-    'gumaps-research-fair':['research fair','pi list','principal investigator','hfsc','lab registration'],
+    'gumaps-research-fair':['research fair','pi list','principal investigator','hfsc','lab registration','flyer','anjali'],
     'squash-round-robin':['round robin','squash on fire','penn','jesters','club squash']
   };
   let best=null,bestScore=0;
   (state.projects||[]).forEach(p=>{
-    const terms=[...tokenize(p.name||''),...(aliases[p.id]||[])];
+    const contextual=[
+      ...(p.waiting||[]).flatMap(w=>tokenize(`${w.who||''} ${w.what||''}`)),
+      ...state.tasks.filter(t=>t.projectId===p.id&&!t.done).slice(0,12).flatMap(t=>tokenize(t.title||''))
+    ];
+    const terms=[...new Set([...tokenize(p.name||''),...(aliases[p.id]||[]),...contextual])];
     const score=terms.reduce((n,t)=>n+(t.length>2&&low.includes(t)?1:0),0);
     if(score>bestScore){best=p;bestScore=score;}
   });
@@ -1075,9 +1085,14 @@ function logHQUpdate(){
   inp.value=''; const low=text.toLowerCase();
   let type=/\b(?:decid(?:ed|e)|agreed)\b/i.test(text)?'decided':(/\b(done|finished|finalized|completed|confirmed|ready)\b/i.test(text)?'completed':'noted');
   const p=projectOf(projectId);
-  if(/(still|hasn.t|haven.t|waiting|no word|no reply)/i.test(text) && !/(confirmed|replied|done|finished)/i.test(text)){
-    const who=(text.match(/(?:waiting on|from)\s+([A-Za-z][A-Za-z ]{1,40})/i)||[])[1]||'';
-    p.waiting=p.waiting||[]; p.waiting.push({id:uid('w'),what:text,who:who.trim(),sinceDate:localISO(),projectId}); p.status='waiting';
+  if(/\b(?:still waiting|waiting on|no word|no reply|no response|hasn['’]?t|hasnt|haven['’]?t|havent|didn['’]?t|didnt)\b/i.test(text)){
+    const explicit=(text.match(/(?:waiting on|from)\s+([A-Za-z][A-Za-z .'-]{0,40}?)(?=\s+(?:about|for|to|on|since)\b|$)/i)||[])[1]||'';
+    const subject=(text.match(/^([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,3})\s+(?:still\s+)?(?:hasn['’]?t|hasnt|haven['’]?t|havent|didn['’]?t|didnt|has not|have not|did not)/)||[])[1]||'';
+    const who=(explicit||subject).trim();
+    p.waiting=p.waiting||[];
+    const exists=p.waiting.some(w=>titleSimilarity(`${w.who||''} ${w.what||''}`,`${who} ${text}`)>=0.55 || (who&&String(w.who||'').toLowerCase()===who.toLowerCase()));
+    if(!exists)p.waiting.push({id:uid('w'),what:text,who,sinceDate:localISO(),projectId});
+    p.status='waiting';
   }
   const effects=processProjectEvent(projectId,text,type); feedbackFromEffects(projectId,effects,[]); save(); state.activeProjectId=projectId; currentRoute='projects'; renderNav(); render();
 }
@@ -1830,23 +1845,33 @@ function pageReset(){
 // avoids that whole class of failure.
 const ZHQ_BRIDGE_URL=window.location.origin;
 const ZHQ_CONNECTION_KEY='zhq-google-connection';
-function zhqBridgeAvailable(){ return true; }
-function zhqConnectionCode(){ return localStorage.getItem(ZHQ_CONNECTION_KEY)||''; }
+function zhqBridgeAvailable(){ return location.protocol==='http:'||location.protocol==='https:'; }
+function zhqConnectionCode(){ try{return localStorage.getItem(ZHQ_CONNECTION_KEY)||'';}catch(e){return '';} }
+function storeZhqConnectionCode(code){ if(!code)return; try{localStorage.setItem(ZHQ_CONNECTION_KEY,code);}catch(e){} }
 async function apiFetch(path, options={}){
   const url=path.startsWith('http')?path:`${ZHQ_BRIDGE_URL}${path}`;
   const headers={'Content-Type':'application/json',...(options.headers||{})};
   const code=zhqConnectionCode(); if(code) headers['X-ZHQ-Connection']=code;
   const r=await fetch(url,{...options,headers});
+  const refreshed=r.headers.get('X-ZHQ-Connection-Refresh');
+  if(refreshed) storeZhqConnectionCode(refreshed);
   const data=await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data.error||`Request failed (${r.status})`);
+  if(!r.ok){
+    const err=new Error(data.error||`Request failed (${r.status})`);
+    err.status=r.status; err.code=data.error||''; throw err;
+  }
   return data;
 }
 async function hydrateBackendStatus(){
   try{
     const status=await apiFetch('/api/status',{headers:{}});
-    const connected=!!status.connected;
-    ['gcal','gmail','drive','sheets','cloud'].forEach(k=>{ if(!state.integrations[k])state.integrations[k]={connected:false,lastSyncedAt:''}; state.integrations[k].connected=connected; });
+    const connected=!!status.connected, scopes=status.scopes||{};
+    ['gcal','gmail','drive','sheets','cloud'].forEach(k=>{
+      if(!state.integrations[k])state.integrations[k]={connected:false,lastSyncedAt:''};
+      state.integrations[k].connected=connected && (Object.keys(scopes).length?!!scopes[k]:true);
+    });
     localStorage.setItem(DB_KEY,JSON.stringify(state));
+    window.__zhqGoogleConfigured=!!status.googleConfigured;
     return connected;
   }catch(e){ console.warn('Backend status unavailable',e); return false; }
 }
@@ -1856,15 +1881,35 @@ function waitingOnPayload(){
   state.tasks.filter(t=>!t.done&&t.waitingOn).forEach(t=>items.push({projectId:t.projectId||'',taskId:t.id,waitingId:t.waitingOn.id,who:t.waitingOn.who||'',what:t.waitingOn.what||'',sinceDate:t.waitingOn.sinceDate||''}));
   return items;
 }
-let zhqAuthPopup=null, zhqAuthPopupTimer=null, zhqAuthPending=false;
+let zhqAuthPopup=null, zhqAuthPopupTimer=null, zhqAuthPending=false, zhqAuthFinishing=false;
+async function finishGoogleConnection(code){
+  if(zhqAuthFinishing)return;
+  code=code||zhqConnectionCode(); if(!code)return;
+  zhqAuthFinishing=true; zhqAuthPending=false; clearInterval(zhqAuthPopupTimer);
+  storeZhqConnectionCode(code);
+  try{
+    const connected=await hydrateBackendStatus();
+    if(!connected){ toast('Google authorization returned, but HQ could not verify it'); return; }
+    render();
+    await syncCloudStateOnOpen(true); await syncExternalOnOpen(true);
+    toast('Google connected');
+  }finally{ zhqAuthFinishing=false; }
+}
 async function connectIntegration(kind){
-  localStorage.setItem('zhq-google-connect-kind',kind||'all');
+  try{localStorage.setItem('zhq-google-connect-kind',kind||'all');}catch(e){}
+  try{
+    const health=await apiFetch('/health',{headers:{}});
+    if(!health.googleConfigured){ toast('Google is not configured on the HQ server yet'); return; }
+  }catch(e){ toast('HQ server is not reachable right now'); return; }
+  const before=zhqConnectionCode();
   const popup=window.open(`${ZHQ_BRIDGE_URL}/auth/google`,'zhq-google-auth','width=560,height=720');
   if(!popup){ toast('Allow popups to connect Google, then try again'); return; }
   zhqAuthPopup=popup; zhqAuthPending=true;
   toast('Complete Google authorization in the popup');
   clearInterval(zhqAuthPopupTimer);
-  zhqAuthPopupTimer=setInterval(()=>{
+  zhqAuthPopupTimer=setInterval(async()=>{
+    const now=zhqConnectionCode();
+    if(now && now!==before){ await finishGoogleConnection(now); return; }
     if(!zhqAuthPopup||zhqAuthPopup.closed){
       clearInterval(zhqAuthPopupTimer);
       if(zhqAuthPending){ zhqAuthPending=false; toast('Google connection window was closed before finishing'); }
@@ -1872,14 +1917,15 @@ async function connectIntegration(kind){
   },500);
 }
 window.addEventListener('message',async(event)=>{
-  if(event.origin!==ZHQ_BRIDGE_URL)return;
+  if(event.origin!==location.origin)return;
   if(event.data?.type!=='zhq-google-connected'||!event.data?.code)return;
-  zhqAuthPending=false; clearInterval(zhqAuthPopupTimer);
-  localStorage.setItem(ZHQ_CONNECTION_KEY,event.data.code);
-  await hydrateBackendStatus(); render();
-  await syncCloudStateOnOpen(true); await syncExternalOnOpen(true);
-  toast('Google connected');
+  await finishGoogleConnection(event.data.code);
 });
+try{
+  const bc=new BroadcastChannel('zhq-google');
+  bc.onmessage=e=>{ if(e.data?.type==='zhq-google-connected'&&e.data?.code) finishGoogleConnection(e.data.code); };
+}catch(e){}
+window.addEventListener('storage',e=>{ if(e.key===ZHQ_CONNECTION_KEY&&e.newValue) finishGoogleConnection(e.newValue); });
 async function disconnectIntegration(kind){
   try{ await apiFetch('/auth/logout',{method:'POST',body:'{}'}); }catch(e){}
   localStorage.removeItem(ZHQ_CONNECTION_KEY);
