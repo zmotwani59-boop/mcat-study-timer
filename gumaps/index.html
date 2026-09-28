@@ -63,6 +63,11 @@ section{padding:66px 0}
 .date{font-weight:850;color:var(--navy)}
 .event h3{margin:0 0 3px}
 .event p{margin:0;color:var(--muted);font-size:14px}
+.status{display:inline-flex;align-items:center;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:850;letter-spacing:.05em;margin-top:7px;background:var(--soft);color:var(--navy)}
+.status.open{background:#eaf6ee;color:#1d6b3a}
+.status.full{background:#f3f1ee;color:#6f6257}
+.status.soon{background:#fff4dd;color:#8a5a00}
+.service-note{margin-top:14px;font-size:13px;color:var(--muted)}
 .board-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .board-card{display:flex;gap:14px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px}
 .initials{flex:0 0 44px;height:44px;border-radius:50%;background:var(--navy);color:#fff;display:grid;place-items:center;font-weight:850;font-size:13px}
@@ -146,23 +151,72 @@ footer{border-top:1px solid var(--line);padding:38px 0;color:var(--muted);font-s
 <section>
   <div class="wrap">
     <div class="callout">
-      <div><h2>Ready to volunteer?</h2><p>Our public signup hub shows open opportunities and coming-soon dates without exposing internal board notes or other students’ information.</p></div>
-      <a class="btn" href="https://app.notion.com/p/3e8d776f6a60816e984bff024d4e6a42?pvs=204" target="_blank" rel="noopener">Open service opportunities →</a>
+      <div><h2>Looking for a volunteer spot?</h2><p>If you were not placed in an initial cohort, check the openings below. Availability is first-come, first-served and partner registration may close once capacity is reached.</p></div>
+      <a class="btn" href="#events">See open volunteer spots →</a>
     </div>
   </div>
 </section>
 
 <section id="events">
   <div class="wrap">
-    <h2 class="section-title">Upcoming</h2>
-    <p class="section-copy">Current GUMAPS events and service opportunities. Dates marked through external registration use the partner’s own signup page.</p>
+    <h2 class="section-title">Volunteer opportunities</h2>
+    <p class="section-copy">Open spots are listed first. If you were not placed in an initial GUMAPS cohort, you can still register directly for opportunities that show availability below.</p>
     <div class="event-list">
-      <div class="event"><div class="date">OCT 3</div><div><h3>Miles for Migraine — DC</h3><p>8:00 AM–12:00 PM · Volunteer individually and represent GUMAPS.</p></div><a class="btn secondary" href="https://raceroster.com/events/2026/115081/miles-for-migraine-dcvamd-2026/volunteer" target="_blank" rel="noopener">Register</a></div>
-      <div class="event"><div class="date">OCT 16</div><div><h3>Miriam’s Kitchen</h3><p>Dinner service shift · 3:00–5:30 PM · Signup coming soon.</p></div><a class="btn secondary" href="https://app.notion.com/p/3e8d776f6a60816e984bff024d4e6a42?pvs=204" target="_blank" rel="noopener">Details</a></div>
-      <div class="event"><div class="date">OCT 17</div><div><h3>Race for Every Child</h3><p>GUMAPS group volunteer opportunity · Washington, DC.</p></div><a class="btn secondary" href="https://runsignup.com/Race/Volunteer/DC/Washington/RaceForEveryChildVOLUNTEERSIGNUP#volunteerTask-571184" target="_blank" rel="noopener">Register</a></div>
+      <div class="event">
+        <div class="date">OCT 3</div>
+        <div><h3>Miles for Migraine — DC/VA/MD</h3><p>8:00 AM–12:00 PM · Volunteer individually and represent GUMAPS.</p><span class="status open">OPEN REGISTRATION</span></div>
+        <a class="btn secondary" href="https://raceroster.com/events/2026/115081/miles-for-migraine-dcvamd-2026/volunteer" target="_blank" rel="noopener">Register</a>
+      </div>
+      <div class="event">
+        <div class="date">OCT 17</div>
+        <div><h3>Race for Every Child — Post-Race Tear Down & Clean-Up</h3><p>10:30 AM–12:30 PM · Freedom Plaza · Register individually and enter <strong>GUMAPS</strong> as your group affiliation if prompted.</p><span class="status open">19+ VOLUNTEERS NEEDED AT LAST UPDATE</span></div>
+        <a class="btn secondary" href="https://runsignup.com/Race/Volunteer/DC/Washington/RaceForEveryChildVOLUNTEERSIGNUP#volunteerTask-571184" target="_blank" rel="noopener">Register</a>
+      </div>
+      <div class="event">
+        <div class="date">NOV 10</div>
+        <div><h3>Community of Hope — Fam-Club at The Aya</h3><p>5:30–8:00 PM · Small-group family support opportunity · Each volunteer must register individually through the GUMAPS partner link.</p><span class="status open">UP TO 2 GUMAPS SPOTS LEFT</span></div>
+        <a class="btn secondary" href="https://communityofhopedc.volunteerhub.com/vv2/lp/gumaps/" target="_blank" rel="noopener">Register</a>
+      </div>
+      <div class="event">
+        <div class="date">OCT 16</div>
+        <div><h3>Miriam’s Kitchen — Dinner Service</h3><p>3:00–5:30 PM · Assigned GUMAPS cohort. Volunteers must complete orientation and register through Miriam’s scheduling system.</p><span class="status full">COHORT FULL</span></div>
+        <a class="btn secondary" href="https://www.eventbrite.com/o/miriams-kitchen-6657151125" target="_blank" rel="noopener">Orientation</a>
+      </div>
+      <div class="event">
+        <div class="date">NOV 20</div>
+        <div><h3>Miriam’s Kitchen — Dinner Service</h3><p>3:00–5:30 PM · Assigned GUMAPS cohort.</p><span class="status full">COHORT FULL</span></div>
+        <a class="btn secondary" href="https://www.eventbrite.com/o/miriams-kitchen-6657151125" target="_blank" rel="noopener">Orientation</a>
+      </div>
+      <div class="event">
+        <div class="date">DEC 18</div>
+        <div><h3>Miriam’s Kitchen — Dinner Service</h3><p>3:00–5:30 PM · Assigned GUMAPS cohort.</p><span class="status full">COHORT FULL</span></div>
+        <a class="btn secondary" href="https://www.eventbrite.com/o/miriams-kitchen-6657151125" target="_blank" rel="noopener">Orientation</a>
+      </div>
+      <div class="event">
+        <div class="date">OCT 30</div>
+        <div><h3>Martha’s Table</h3><p>GUMAPS is selecting from the available October 30 service shifts. Registration will be posted once the specific opportunity is reserved.</p><span class="status soon">COMING SOON</span></div>
+        <span></span>
+      </div>
+      <div class="event">
+        <div class="date">TBD</div>
+        <div><h3>Special Olympics DC</h3><p>GUMAPS is working with the partner to establish a group volunteer date.</p><span class="status soon">DATE PENDING</span></div>
+        <span></span>
+      </div>
+      <div class="event">
+        <div class="date">TBD</div>
+        <div><h3>SOME</h3><p>Group service opportunity in planning; exact date and time are still being coordinated with the partner.</p><span class="status soon">DATE PENDING</span></div>
+        <span></span>
+      </div>
+    </div>
+    <p class="service-note">Availability reflects GUMAPS placements and partner information currently available to us. External partner pages control final registration and may fill before this page is updated.</p>
+  </div>
+</section>
+
+<section id="other-events">
+  <div class="wrap">
+    <h2 class="section-title">Other GUMAPS events</h2>
+    <div class="event-list">
       <div class="event"><div class="date">NOV 4</div><div><h3>13th Annual Undergraduate Research Opportunities Fair</h3><p>2:00–5:00 PM · HFSC Social Room.</p></div><span></span></div>
-      <div class="event"><div class="date">NOV 20</div><div><h3>Miriam’s Kitchen</h3><p>Dinner service shift · 3:00–5:30 PM · Signup coming soon.</p></div><a class="btn secondary" href="https://app.notion.com/p/3e8d776f6a60816e984bff024d4e6a42?pvs=204" target="_blank" rel="noopener">Details</a></div>
-      <div class="event"><div class="date">DEC 18</div><div><h3>Miriam’s Kitchen</h3><p>Dinner service shift · 3:00–5:30 PM · Signup coming soon.</p></div><a class="btn secondary" href="https://app.notion.com/p/3e8d776f6a60816e984bff024d4e6a42?pvs=204" target="_blank" rel="noopener">Details</a></div>
     </div>
   </div>
 </section>
