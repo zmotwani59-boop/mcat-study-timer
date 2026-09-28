@@ -2029,12 +2029,30 @@ async function handleGoogleIntake(){
   state.notes.unshift(note); save(); toast(`${source} item captured`,'View',()=>{notesActiveId=note.id;navigate('notes');});
 }
 function pageGoogle(){
-  return `<div class="page-head"><div><h1>Google</h1><span class="subtle">Bring in specific Google context without turning Google into another inbox.</span></div></div>
-  <div class="page-sub">Calendar is read-only in HQ. Gmail only checks replies against things you already marked Waiting On. Drive and Sheets are deliberate imports only.</div>
-  <div class="google-intake"><span class="g-label">Google input</span><input id="google-intake-input" placeholder="Paste a Drive / Docs / Sheets link you want to bring into HQ…" onkeydown="if(event.key==='Enter')handleGoogleIntake()"><button class="btn btn-sm btn-primary" onclick="handleGoogleIntake()">Add to HQ</button></div>
+  const configured=window.__zhqGoogleConfigured===true;
+  const connected=!!(state.integrations?.drive?.connected||state.integrations?.gcal?.connected||state.integrations?.gmail?.connected);
+  const statusCopy=!configured
+    ? 'Google setup is not finished on the server yet.'
+    : connected
+      ? 'Google is connected to HQ.'
+      : 'Google is configured but not connected yet.';
+  const action=!configured
+    ? '<span class="subtle">Needs Google OAuth credentials in Render.</span>'
+    : connected
+      ? '<button class="btn btn-sm" onclick="hydrateBackendStatus().then(()=>render())">Refresh connection</button>'
+      : '<button class="btn btn-sm btn-primary" onclick="connectIntegration(\'all\')">Connect Google</button>';
+  const intakeDisabled=!configured||!state.integrations?.drive?.connected;
+  return `<div class="page-head"><div><h1>Google</h1><span class="subtle">Bring Google context into HQ without turning Google into another inbox.</span></div></div>
+  <div class="page-sub">Calendar stays read-only. Gmail only checks existing Waiting On items. Drive and Sheets are deliberate imports only.</div>
+  <div class="integration-card" style="margin-bottom:14px">
+    <div class="integration-head"><span class="integration-name">Google connection</span><span class="integration-status">${configured?(connected?'Connected':'Ready to connect'):'Not configured'}</span></div>
+    <p>${statusCopy}</p><div class="setting-actions">${action}</div>
+  </div>
+  <div class="google-intake"><span class="g-label">Google input</span><input id="google-intake-input" ${intakeDisabled?'disabled':''} placeholder="${intakeDisabled?'Connect Google first to import a Doc / Drive / Sheet link…':'Paste a Drive / Docs / Sheets link you want to bring into HQ…'}" onkeydown="if(event.key==='Enter')handleGoogleIntake()"><button class="btn btn-sm btn-primary" ${intakeDisabled?'disabled':''} onclick="handleGoogleIntake()">Import to HQ</button></div>
+  ${intakeDisabled?'<div class="google-help">Import is unavailable until Google is configured and connected.</div>':''}
   <div class="integration-grid">
-    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Drive</span><span class="integration-status">${state.integrations?.drive?.connected?'Connected':'Deliberate only'}</span></div><p>Read a specific Drive file only when you paste its link. No automatic Drive crawl.</p></div>
-    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Sheets</span><span class="integration-status">${state.integrations?.sheets?.connected?'Connected':'Deliberate only'}</span></div><p>Import a specific Sheet intentionally. HQ never converts a whole Sheet into tasks automatically.</p></div>
+    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Drive</span><span class="integration-status">${state.integrations?.drive?.connected?'Connected':'Not connected'}</span></div><p>Paste one specific Drive or Google Doc link. HQ reads only that file.</p></div>
+    <div class="integration-card"><div class="integration-head"><span class="integration-name">Google Sheets</span><span class="integration-status">${state.integrations?.sheets?.connected?'Connected':'Not connected'}</span></div><p>Paste one specific Sheet link. HQ imports a bounded preview and never converts rows into tasks automatically.</p></div>
   </div>`;
 }
 
