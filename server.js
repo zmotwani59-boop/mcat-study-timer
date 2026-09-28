@@ -5,10 +5,13 @@ const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const BASE_URL = process.env.APP_BASE_URL || `http://localhost:${PORT}`;
+const BASE_URL = String(process.env.APP_BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const SESSION_SECRET = process.env.ZHQ_SESSION_SECRET || '';
+const CONFIGURED = !!(CLIENT_ID && CLIENT_SECRET && SESSION_SECRET);
+const REDIRECT_URI = `${BASE_URL}/auth/google/callback`;
+const CONNECTION_KEY = 'zhq-google-connection';
 
 function sessionKey(){
   if(!SESSION_SECRET) return null;
@@ -50,11 +53,13 @@ function validOAuthState(state){
   return actual.length===expected.length && crypto.timingSafeEqual(actual,expected);
 }
 
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use((req,res,next)=>{
-  res.setHeader('Access-Control-Allow-Origin','*');
+  if(req.get('Origin') === new URL(BASE_URL).origin) res.setHeader('Access-Control-Allow-Origin', BASE_URL);
   res.setHeader('Access-Control-Allow-Headers','Content-Type, X-ZHQ-Connection');
+  res.setHeader('Access-Control-Expose-Headers','X-ZHQ-Connection-Refresh');
   res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
+  if(/^\/(api|auth)\//.test(req.path)) res.setHeader('Cache-Control','no-store');
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -67,34 +72,9 @@ app.use((req,res,next)=>{
 // depending on caching, some requests would show a stale prior deploy while
 // fresh ones hit an empty response. Serve the single HTML file explicitly.
 const INDEX_HTML = path.join(__dirname, 'index.html');
-app.get('/', (_req, res) => res.sendFile(INDEX_HTML));
+app.get(['/', '/index.html'], (_req,res)=>res.sendFile(INDEX_HTML));
+app.use(express.static(path.join(__dirname,'public')));
 
-function makeOAuth(){
-  return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, `${BASE_URL}/auth/google/callback`);
-}
-function authForCode(code){
-  const tokens=unseal(code);
-  if(!tokens) return null;
-  const c=makeOAuth(); c.setCredentials(tokens); return c;
-}
-// Token refresh audit: the connection token is self-contained (it seals the
-// original access_token + refresh_token, not a server-side session id). That
-// is fine for refresh: since `access_type:'offline'` + `prompt:'consent'` are
-// used at /auth/google, the refresh_token is long-lived, and googleapis
-// transparently refreshes an expired access_token on-demand for any client
-// built from it (it checks expiry before each API call and calls the token
-// endpoint using the refresh_token already present in `tokens`). Each request
-// reconstructs its own OAuth2 client from the same refresh_token, so refreshed
-// access_tokens don't need to be written back anywhere for requests to keep
-// working — the refresh_token itself is what's durable, and it's already
-// persisted (sealed in the token the browser holds). No server-side session
-// store is required for this to keep functioning.
-function requireConnection(req,res,next){
-  const code=req.get('X-ZHQ-Connection')||'';
-  const auth=authForCode(code);
-  if(!auth) return res.status(401).json({ok:false,error:'not_connected'});
-  req.googleAuth=auth; req.connectionCode=code; next();
-}
 const SCOPES=[
   'openid','email',
   'https://www.googleapis.com/auth/calendar.readonly',
@@ -103,69 +83,121 @@ const SCOPES=[
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/spreadsheets.readonly'
 ];
+const has=(tokens,scope)=>String(tokens?.scope||'').split(/\s+/).includes(scope);
+function scopeMap(tokens){
+  return {
+    gcal:has(tokens,'https://www.googleapis.com/auth/calendar.readonly'),
+    gmail:has(tokens,'https://www.googleapis.com/auth/gmail.readonly'),
+    drive:has(tokens,'https://www.googleapis.com/auth/drive.readonly'),
+    sheets:has(tokens,'https://www.googleapis.com/auth/spreadsheets.readonly'),
+    cloud:has(tokens,'https://www.googleapis.com/auth/drive.file')
+  };
+}
+function makeOAuth(){ return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI); }
+function requireConnection(req,res,next){
+  const tokens=unseal(req.get('X-ZHQ-Connection')||'');
+  if(!tokens) return res.status(401).json({ok:false,error:'not_connected'});
+  const c=makeOAuth(); c.setCredentials(tokens);
+  c.on('tokens',t=>{ req.newTokens={...tokens,...t,refresh_token:t.refresh_token||tokens.refresh_token}; });
+  const json=res.json.bind(res);
+  res.json=body=>{
+    if(req.newTokens){ try{res.setHeader('X-ZHQ-Connection-Refresh',seal(req.newTokens));}catch(_e){} }
+    return json(body);
+  };
+  req.googleAuth=c; req.tokens=tokens; next();
+}
+function fail(res,e,code){
+  console.error(code,e?.response?.data?.error||e?.message||e);
+  const st=e?.code||e?.status||e?.response?.status;
+  const msg=JSON.stringify(e?.response?.data||'')+String(e?.message||'');
+  if(st===401||/invalid_grant|invalid_credentials|unauthorized_client/i.test(msg)) return res.status(401).json({ok:false,error:'not_connected'});
+  if(st===403&&/insufficient|scope|accessNotConfigured|has not been used|disabled/i.test(msg)) return res.status(403).json({ok:false,error:'scope_or_api_disabled'});
+  if(st===404) return res.status(404).json({ok:false,error:'not_found_or_not_shared'});
+  return res.status(500).json({ok:false,error:code});
+}
 
-app.get('/health',(_req,res)=>res.json({ok:true,service:'zahra-hq-google-bridge',googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET&&SESSION_SECRET)}));
-
-app.get('/auth/google',(req,res)=>{
-  if(!CLIENT_ID||!CLIENT_SECRET||!SESSION_SECRET) return res.status(503).send('Google OAuth is not configured yet.');
-  const state=makeOAuthState();
-  const url=makeOAuth().generateAuthUrl({access_type:'offline',prompt:'consent',scope:SCOPES,state});
-  res.redirect(url);
-});
-
-app.get('/auth/google/callback',async(req,res)=>{
-  try{
-    if(!validOAuthState(req.query.state)) throw new Error('invalid_oauth_state');
-    const client=makeOAuth();
-    const {tokens}=await client.getToken(req.query.code);
-    const code=seal(tokens);
-    res.type('html').send(`<!doctype html><meta charset="utf-8"><title>Zahra HQ connected</title><body style="font:16px system-ui;padding:32px">Google connected to Zahra HQ. This window can close.<script>try{window.opener&&window.opener.postMessage({type:'zhq-google-connected',code:${JSON.stringify(code)}},'*')}catch(e){} setTimeout(()=>window.close(),700);</script></body>`);
-  }catch(e){
-    console.error(e);
-    res.status(400).send('Google connection failed. You can close this window and try again.');
-  }
-});
+app.get('/health',(_req,res)=>res.json({ok:true,service:'zahra-hq-google-bridge',googleConfigured:CONFIGURED,redirectUri:REDIRECT_URI}));
 
 app.get('/api/status',(req,res)=>{
-  const code=req.get('X-ZHQ-Connection')||'';
-  res.json({ok:true,connected:!!authForCode(code),googleConfigured:!!(CLIENT_ID&&CLIENT_SECRET&&SESSION_SECRET)});
+  const tokens=unseal(req.get('X-ZHQ-Connection')||'');
+  res.json({ok:true,connected:!!tokens,googleConfigured:CONFIGURED,scopes:tokens?scopeMap(tokens):{}});
+});
+
+app.get('/auth/google',(_req,res)=>{
+  if(!CONFIGURED) return res.status(503).send('Google OAuth is not configured yet (missing GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET or ZHQ_SESSION_SECRET).');
+  res.redirect(makeOAuth().generateAuthUrl({access_type:'offline',prompt:'consent',scope:SCOPES,state:makeOAuthState()}));
+});
+
+function authPage(msg){ return `<!doctype html><meta charset="utf-8"><title>Zahra HQ</title><body style="font:16px system-ui;padding:32px">${msg}</body>`; }
+app.get('/auth/google/callback',async(req,res)=>{
+  try{
+    if(req.query.error) return res.status(400).type('html').send(authPage('Google connection was cancelled. You can close this window.'));
+    if(!validOAuthState(req.query.state)) throw new Error('invalid_oauth_state');
+    if(!req.query.code) throw new Error('missing_code');
+    const {tokens}=await makeOAuth().getToken(req.query.code);
+    if(!tokens.refresh_token) return res.status(400).type('html').send(authPage('Google did not return a refresh token. Remove Zahra HQ from your Google account permissions, then connect again.'));
+    const code=JSON.stringify(seal(tokens)).replace(/</g,'\\u003c');
+    res.type('html').send(authPage(`Google connected to Zahra HQ. This window can close.<script>(function(){var c=${code},K=${JSON.stringify(CONNECTION_KEY)};
+try{localStorage.setItem(K,c)}catch(e){}
+try{var b=new BroadcastChannel('zhq-google');b.postMessage({type:'zhq-google-connected',code:c});b.close()}catch(e){}
+try{if(window.opener)window.opener.postMessage({type:'zhq-google-connected',code:c},location.origin)}catch(e){}
+setTimeout(function(){window.close()},900)})();</script>`));
+  }catch(e){
+    console.error('oauth callback',e?.response?.data||e?.message||e);
+    res.status(400).type('html').send(authPage('Google connection failed. You can close this window and try again.'));
+  }
 });
 
 app.post('/auth/logout',(_req,res)=>{ res.json({ok:true}); });
 
+const hhmm=x=>(/T(\d{2}:\d{2})/.exec(x||'')||[])[1]||'';
+const addDay=(iso,n)=>{const d=new Date(iso+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);};
+function toEvents(e){
+  const base={title:e.summary||'(Untitled)',location:e.location||'',externalUrl:e.htmlLink||'',source:'gcal'};
+  if(e.start?.date){
+    const out=[],last=e.end?.date?addDay(e.end.date,-1):e.start.date;
+    for(let d=e.start.date,i=0;d<=last&&i<14;d=addDay(d,1),i++)out.push({...base,id:i?`${e.id}:${d}`:e.id,date:d,start:'',end:'',allDay:true});
+    return out;
+  }
+  return [{...base,id:e.id,date:(e.start?.dateTime||'').slice(0,10),start:hhmm(e.start?.dateTime),end:hhmm(e.end?.dateTime),allDay:false}];
+}
+const validDate=x=>x&&!isNaN(Date.parse(x));
 app.get('/api/calendar',requireConnection,async(req,res)=>{
   try{
     const calendar=google.calendar({version:'v3',auth:req.googleAuth});
-    const start=req.query.start||new Date().toISOString();
-    const end=req.query.end||new Date(Date.now()+45*86400000).toISOString();
+    const start=validDate(req.query.start)?new Date(req.query.start).toISOString():new Date().toISOString();
+    const end=validDate(req.query.end)?new Date(req.query.end).toISOString():new Date(Date.now()+45*86400000).toISOString();
     const r=await calendar.events.list({calendarId:'primary',timeMin:start,timeMax:end,singleEvents:true,orderBy:'startTime',maxResults:500});
-    const events=(r.data.items||[]).map(e=>({id:e.id,title:e.summary||'(Untitled)',date:(e.start?.dateTime||e.start?.date||'').slice(0,10),start:e.start?.dateTime||'',end:e.end?.dateTime||'',allDay:!!e.start?.date,location:e.location||'',externalUrl:e.htmlLink||'',source:'gcal'}));
-    res.json({ok:true,events});
-  }catch(e){console.error(e);res.status(500).json({ok:false,error:'calendar_fetch_failed'});}
+    res.json({ok:true,events:(r.data.items||[]).filter(e=>e.status!=='cancelled').flatMap(toEvents).filter(e=>e.date)});
+  }catch(e){fail(res,e,'calendar_fetch_failed');}
 });
 
-function terms(s){return String(s||'').toLowerCase().match(/[a-z0-9@._-]{3,}/g)||[];}
+const STOP=new Set(['the','and','for','with','from','that','this','about','have','has','will','are','was','not','you','your','our','waiting','wait','still','need','needs','get','got','confirm','confirmed','reply','replied','date','room','meeting']);
+const terms=x=>(String(x||'').toLowerCase().match(/[a-z0-9@._-]{3,}/g)||[]).filter(t=>!STOP.has(t));
 app.post('/api/waiting-email-matches',requireConnection,async(req,res)=>{
   try{
-    const waiting=Array.isArray(req.body?.waitingOn)?req.body.waitingOn.slice(0,30):[];
+    const waiting=Array.isArray(req.body?.waitingOn)?req.body.waitingOn.slice(0,12):[];
     if(!waiting.length)return res.json({ok:true,emails:[]});
     const gmail=google.gmail({version:'v1',auth:req.googleAuth});
     const seen=new Set(),emails=[];
     for(const w of waiting){
-      const ts=terms(`${w.who||''} ${w.what||''}`).slice(0,4); if(!ts.length)continue;
-      const q=`newer_than:30d -in:spam -in:trash ${ts.slice(0,2).join(' ')}`;
-      const list=await gmail.users.messages.list({userId:'me',q,maxResults:5});
+      const who=terms(w.who),what=terms(w.what),ts=[...new Set([...who,...what])].slice(0,5);
+      if(!ts.length)continue;
+      const need=Math.min(2,ts.length);
+      const q=`newer_than:30d -in:spam -in:trash -from:me ${(who.length?who:ts).slice(0,2).join(' ')}`;
+      const list=await gmail.users.messages.list({userId:'me',q,maxResults:4});
       for(const m of list.data.messages||[]){
-        if(seen.has(m.id))continue; seen.add(m.id);
+        if(seen.has(m.id+w.waitingId))continue; seen.add(m.id+w.waitingId);
         const full=await gmail.users.messages.get({userId:'me',id:m.id,format:'metadata',metadataHeaders:['From','Subject','Date']});
         const h=Object.fromEntries((full.data.payload?.headers||[]).map(x=>[x.name.toLowerCase(),x.value]));
         const hay=`${h.from||''} ${h.subject||''} ${full.data.snippet||''}`.toLowerCase();
-        const score=ts.filter(t=>hay.includes(t)).length; if(!score)continue;
-        emails.push({id:m.id,from:h.from||'',subject:h.subject||'',snippet:full.data.snippet||'',emailDate:h.date||'',waitingId:w.waitingId||'',projectId:w.projectId||'',taskId:w.taskId||'',url:`https://mail.google.com/mail/u/0/#all/${m.id}`,score});
+        const score=ts.filter(t=>hay.includes(t)).length;
+        if(score<need||(who.length&&!who.some(t=>hay.includes(t))))continue;
+        emails.push({id:m.id,from:h.from||'',subject:h.subject||'',snippet:(full.data.snippet||'').slice(0,200),emailDate:h.date||'',waitingId:w.waitingId||'',projectId:w.projectId||'',taskId:w.taskId||'',url:`https://mail.google.com/mail/u/0/#all/${m.id}`,score});
       }
     }
-    emails.sort((a,b)=>b.score-a.score); res.json({ok:true,emails:emails.slice(0,40)});
-  }catch(e){console.error(e);res.status(500).json({ok:false,error:'gmail_fetch_failed'});}
+    emails.sort((a,b)=>b.score-a.score);res.json({ok:true,emails:emails.slice(0,40)});
+  }catch(e){fail(res,e,'gmail_fetch_failed');}
 });
 
 const STATE_NAME='Zahra HQ State.json';
@@ -181,17 +213,22 @@ app.get('/api/state',requireConnection,async(req,res)=>{
 });
 app.post('/api/state',requireConnection,async(req,res)=>{
   try{
+    const incoming=req.body?.state;
+    if(!incoming||typeof incoming!=='object'||!Array.isArray(incoming.tasks))return res.status(400).json({ok:false,error:'invalid_state'});
     const drive=google.drive({version:'v3',auth:req.googleAuth});
     const f=await stateFile(drive);
-    const media={mimeType:'application/json',body:JSON.stringify(req.body?.state||{},null,2)};
+    if(f){
+      const r=await drive.files.get({fileId:f.id,alt:'media'},{responseType:'text'});
+      const current=typeof r.data==='string'?JSON.parse(r.data):r.data;
+      const inT=Date.parse(incoming.updatedAt||0)||0,curT=Date.parse(current?.updatedAt||0)||0;
+      if(curT>inT)return res.status(409).json({ok:false,error:'stale_state',remoteUpdatedAt:current.updatedAt||''});
+    }
+    const media={mimeType:'application/json',body:JSON.stringify(incoming,null,2)};
     let id;
     if(f){await drive.files.update({fileId:f.id,media});id=f.id;}
-    else{
-      const c=await drive.files.create({requestBody:{name:STATE_NAME,mimeType:'application/json'},media,fields:'id'});
-      id=c.data.id;
-    }
+    else{id=(await drive.files.create({requestBody:{name:STATE_NAME,mimeType:'application/json'},media,fields:'id'})).data.id;}
     res.json({ok:true,id});
-  }catch(e){console.error(e);res.status(500).json({ok:false,error:'state_save_failed'});}
+  }catch(e){fail(res,e,'state_save_failed');}
 });
 
 function googleId(url){
@@ -244,4 +281,4 @@ app.get('*', (req, res) => {
   res.sendFile(INDEX_HTML);
 });
 
-app.listen(PORT,()=>console.log(`Zahra HQ Google bridge listening on ${PORT}`));
+app.listen(PORT,()=>console.log(`Zahra HQ listening on ${PORT} (base ${BASE_URL}, google ${CONFIGURED?'configured':'NOT configured'})`));
