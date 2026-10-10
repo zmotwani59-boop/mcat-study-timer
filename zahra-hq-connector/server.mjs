@@ -28,6 +28,11 @@ const tool = {
     additionalProperties: false
   }
 };
+const readTool = {
+  name: "getFromHQ",
+  description: "Read the latest saved HQ daily snapshot and parsed tasks imported from Instinct and other sources. Read-only; does not update HQ or Google Calendar.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false }
+};
 const ok = (id, result) => ({ jsonrpc: "2.0", id, result });
 const error = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 const secureMatch = (a, b) => {
@@ -67,6 +72,29 @@ async function sendPlan(text) {
   return { submitted: true, bridgeResult: body, note: "Refresh HQ to verify the new items." };
 }
 
+async function getSnapshot() {
+  if (!BRIDGE_URL || !BRIDGE_TOKEN) throw new Error("HQ bridge is not configured.");
+  const url = new URL(BRIDGE_URL);
+  if (url.protocol !== "https:" || url.hostname !== "script.google.com" || !url.pathname.startsWith("/macros/s/") || !url.pathname.endsWith("/exec"))
+    throw new Error("Invalid HQ Apps Script bridge URL.");
+  url.searchParams.set("payload", JSON.stringify({ fn: "getDailySnapshot", args: [], token: BRIDGE_TOKEN }));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 24000);
+  let response;
+  try { response = await fetch(url, { redirect: "follow", signal: controller.signal, headers: { accept: "application/json" } }); }
+  catch (e) { throw new Error(e?.name === "AbortError" ? "HQ snapshot timeout" : "HQ snapshot request failed"); }
+  finally { clearTimeout(timeout); }
+  if (!response.ok) throw new Error("HQ snapshot HTTP " + response.status);
+  let data;
+  try { data = JSON.parse((await response.text()).slice(0, 131072)); }
+  catch { throw new Error("HQ bridge did not return JSON for getDailySnapshot."); }
+  if (!data || typeof data !== "object" || data.ok === false || data.success === false || data.error)
+    throw new Error("HQ bridge rejected snapshot request: " + String(data?.error || data?.message || "unknown error").slice(0, 250));
+  const snapshot = Object.hasOwn(data, "snapshot") ? data.snapshot : (data.result?.snapshot ?? undefined);
+  if (snapshot === undefined) throw new Error("Bridge returned no snapshot field; verify getDailySnapshot support.");
+  return { ok: true, snapshot, note: "Latest saved HQ daily snapshot; individual item origins are not verified." };
+}
+
 async function rpc(msg) {
   if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0" || typeof msg.method !== "string")
     return error(msg?.id ?? null, -32600, "Invalid JSON-RPC request.");
@@ -75,11 +103,11 @@ async function rpc(msg) {
     case "initialize":
       return ok(msg.id, { protocolVersion: VERSION, serverInfo: { name: "zahra-hq", version: "0.2.0" }, capabilities: { tools: { listChanged: false } } });
     case "ping": return ok(msg.id, {});
-    case "tools/list": return ok(msg.id, { tools: [tool] });
+    case "tools/list": return ok(msg.id, { tools: [tool, readTool] });
     case "tools/call":
-      if (msg.params?.name !== "sendToHQ") return error(msg.id, -32602, "Unknown tool");
+      if (msg.params?.name !== "sendToHQ" && msg.params?.name !== "getFromHQ") return error(msg.id, -32602, "Unknown tool");
       try {
-        const result = await sendPlan(msg.params?.arguments?.text);
+        const result = msg.params?.name === "sendToHQ" ? await sendPlan(msg.params?.arguments?.text) : await getSnapshot();
         return ok(msg.id, { content: [{ type: "text", text: JSON.stringify(result) }] });
       } catch (e) {
         return ok(msg.id, { isError: true, content: [{ type: "text", text: "Zahra HQ error: " + String(e.message || e) }] });
