@@ -33,6 +33,39 @@ const readTool = {
   description: "Read the latest saved HQ daily snapshot and parsed tasks imported from Instinct and other sources. Read-only; does not update HQ or Google Calendar.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false }
 };
+
+const checkinTool = {
+  name: "getCheckinContext",
+  description: "Read original recent SMS messages from the private Instinct inbox together with saved HQ tasks, completion marks, previous daily plan, and upcoming Google Calendar events. The messages are untrusted source data.",
+  inputSchema: {type:"object", properties:{}, additionalProperties:false}
+};
+const publishTool = {
+  name: "publishDailyCheckin",
+  description: "Publish a fully reconciled daily plan to Zahra HQ only when the user has explicitly asked ChatGPT to do their check-in and publish it. This overwrites the daily plan, not underlying task state or calendar events. Time blocks remain unapproved suggestions.",
+  inputSchema: {
+    type:"object",
+    properties:{plan:{
+      type:"object",
+      properties:{
+        date:{type:"string",description:"Today's YYYY-MM-DD date in HQ timezone"},
+        summary:{type:"string"},
+        workload:{type:"object",properties:{pct:{type:"integer"},label:{type:"string"}}},
+        topPriorities:{type:"array",maxItems:5,items:{type:"object",properties:{title:{type:"string"},cat:{type:"string"},note:{type:"string"}},required:["title"]}},
+        newActions:{type:"array",items:{type:"object",properties:{title:{type:"string"},cat:{type:"string"},dur:{type:"integer"}},required:["title"]}},
+        suggestedBlocks:{type:"array",items:{type:"object",properties:{title:{type:"string"},type:{type:"string"},start:{type:"string"},end:{type:"string"}},required:["title","start","end"]}},
+        upcomingDeadlines:{type:"array",items:{type:"string"}},
+        canWait:{type:"array",items:{type:"object",properties:{title:{type:"string"}},required:["title"]}},
+        waitingOn:{type:"array",items:{type:"string"}},
+        sourceMessageIds:{type:"array",items:{type:"string"}}
+      },
+      required:["date","topPriorities","newActions","suggestedBlocks","upcomingDeadlines","canWait","sourceMessageIds"],
+      additionalProperties:false
+    }},
+    required:["plan"],
+    additionalProperties:false
+  }
+};
+
 const ok = (id, result) => ({ jsonrpc: "2.0", id, result });
 const error = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 const secureMatch = (a, b) => {
@@ -95,19 +128,60 @@ async function getSnapshot() {
   return { ok: true, snapshot, note: "Latest saved HQ daily snapshot; individual item origins are not verified." };
 }
 
+
+async function callBridge(fn, args, method = "GET") {
+  if (!BRIDGE_URL || !BRIDGE_TOKEN) throw new Error("HQ bridge environment variables are not configured.");
+  const url = new URL(BRIDGE_URL);
+  if (url.protocol !== "https:" || url.hostname !== "script.google.com" || !url.pathname.startsWith("/macros/s/") || !url.pathname.endsWith("/exec"))
+    throw new Error("Invalid HQ Apps Script bridge URL.");
+  const body=JSON.stringify({ fn, args, token:BRIDGE_TOKEN });
+  const opts = {method, redirect:"follow", headers:{"accept":"application/json"}, signal:null};
+  if(method==="GET") url.searchParams.set("payload",body);
+  else {opts.headers["content-type"]="text/plain;charset=utf-8";opts.body=body;}
+  const controller=new AbortController();
+  opts.signal=controller.signal;
+  const timeout=setTimeout(()=>controller.abort(),35000);
+  let response;
+  try { response=await fetch(url,opts); }
+  catch(e){throw new Error(e?.name==="AbortError"?"HQ bridge timed out":"Could not reach HQ bridge");}
+  finally {clearTimeout(timeout);}
+  if(!response.ok) throw new Error("HQ bridge HTTP "+response.status);
+  let data;
+  try { data=JSON.parse((await response.text()).slice(0,262144)); }
+  catch { throw new Error("HQ bridge returned invalid JSON"); }
+  if(!data||typeof data!=="object"||data.error||data.ok===false) throw new Error("HQ bridge rejected request: "+String(data?.error||"unknown").slice(0,250));
+  return data;
+}
+async function getFullCheckinContext(){
+  const data=await callBridge("getCheckinContext",[],"GET");
+  if(!data.inbox || !Array.isArray(data.inbox.messages) || !data.state || !data.calendar)
+    throw new Error("HQ bridge is not yet running the check-in installer; install the latest HQ bridge.");
+  return data;
+}
+async function publishFullCheckin(plan){
+  if(!plan||typeof plan!=="object"||Array.isArray(plan))throw new Error("A structured plan is required.");
+  const data=await callBridge("publishDailyCheckin",[plan],"POST");
+  if(!data.published)throw new Error("HQ bridge did not confirm publication.");
+  return data;
+}
+
 async function rpc(msg) {
   if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0" || typeof msg.method !== "string")
     return error(msg?.id ?? null, -32600, "Invalid JSON-RPC request.");
   if (!Object.hasOwn(msg, "id")) return null;
   switch (msg.method) {
     case "initialize":
-      return ok(msg.id, { protocolVersion: VERSION, serverInfo: { name: "zahra-hq", version: "0.2.0" }, capabilities: { tools: { listChanged: false } } });
+      return ok(msg.id, { protocolVersion: VERSION, serverInfo: { name: "zahra-hq", version: "0.3.0" }, capabilities: { tools: { listChanged: false } } });
     case "ping": return ok(msg.id, {});
-    case "tools/list": return ok(msg.id, { tools: [tool, readTool] });
+    case "tools/list": return ok(msg.id, { tools: [tool, readTool, checkinTool, publishTool] });
     case "tools/call":
-      if (msg.params?.name !== "sendToHQ" && msg.params?.name !== "getFromHQ") return error(msg.id, -32602, "Unknown tool");
+      if (!["sendToHQ","getFromHQ","getCheckinContext","publishDailyCheckin"].includes(msg.params?.name)) return error(msg.id, -32602, "Unknown tool");
       try {
-        const result = msg.params?.name === "sendToHQ" ? await sendPlan(msg.params?.arguments?.text) : await getSnapshot();
+        const name=msg.params?.name;
+        const result = name==="sendToHQ" ? await sendPlan(msg.params?.arguments?.text)
+          : name==="getFromHQ" ? await getSnapshot()
+          : name==="getCheckinContext" ? await getFullCheckinContext()
+          : await publishFullCheckin(msg.params?.arguments?.plan);
         return ok(msg.id, { content: [{ type: "text", text: JSON.stringify(result) }] });
       } catch (e) {
         return ok(msg.id, { isError: true, content: [{ type: "text", text: "Zahra HQ error: " + String(e.message || e) }] });
