@@ -47,7 +47,7 @@ async function sendPlan(text) {
   }
   if (!BRIDGE_URL || !BRIDGE_TOKEN) throw new Error("HQ bridge environment variables are not configured.");
   const url = new URL(BRIDGE_URL);
-  if (url.protocol !== "https:" || url.hostname !== "script.google.com" || !/^\\/macros\\/s\\/[^/]+\\/exec$/.test(url.pathname))
+  if (url.protocol !== "https:" || url.hostname !== "script.google.com" || !url.pathname.startsWith("/macros/s/") || !url.pathname.endsWith("/exec"))
     throw new Error("Invalid HQ Apps Script bridge URL.");
   url.searchParams.set("token", BRIDGE_TOKEN);
   url.searchParams.set("text", text);
