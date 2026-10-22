@@ -1,21 +1,19 @@
-# Clockify → Notion live study timer
+# GUMAPS Website
 
-This widget displays the currently running Clockify entry and ticks locally every second. It checks Clockify every three minutes to detect starts, stops, and task-name changes. Use the **Refresh now** button after starting or stopping a timer when you want the dashboard to update immediately.
+Website for Georgetown University Minority Association of Pre-Health Students (GUMAPS).
 
-The three-minute refresh interval keeps the widget below Clockify Free's API limit of 30 requests per hour: this version makes one Clockify API request per refresh, or about 20 per hour.
+## Site files
+All live website files are in `gumaps/`:
+- `index.html` — homepage
+- `volunteer.html` — volunteer opportunities
+- `research-fair.html` — Undergraduate Research Opportunities Fair directory (November 4, 2026)
+- `research-fair-print.html` — print-friendly fair guide
+- `research-qr.svg` — fair QR graphic
 
-## Required Vercel environment variables
+## Deployment
+This is a clean, website-only branch prepared for a standalone GitHub repository. The existing GUMAPS Render service was previously configured to deploy from the `gumaps-site` branch of the original repository. Do not switch it until the standalone repository is populated.
 
-- `CLOCKIFY_API_KEY` — generate this in Clockify. Keep it private.
-- `CLOCKIFY_WORKSPACE_ID` — your Clockify workspace ID.
-- `CLOCKIFY_API_BASE` — optional. Leave unset for the global API. If your Clockify workspace uses a regional API host, enter that API base ending in `/api/v1`.
+For a Render Static Site deploying this structure, publish the `gumaps` directory. No Clockify, MCAT timer, Zahra HQ backend, or Vercel configuration is needed.
 
-## Deploy without using Terminal
-
-1. In Vercel, select **Add New → Project** and import this repository.
-2. Add the environment variables above in **Settings → Environment Variables**.
-3. Deploy or redeploy.
-4. Open the Vercel production URL.
-5. In Notion, type `/embed`, paste the production URL, and resize the block.
-
-Never put the Clockify API key in `index.html` or any browser-visible code.
+## Editing
+Website updates are changes to the HTML and SVG files in `gumaps/`. Review changes before publishing to the live site.
